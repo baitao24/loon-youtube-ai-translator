@@ -1,0 +1,35 @@
+#!name = YouTube AI 双语字幕
+#!desc = 使用自选 OpenAI-Compatible 或 Gemini 模型翻译 YouTube 现有字幕，并显示原文与译文。API Key 仅保存在 Loon 本机并直连所选服务商。
+#!author = Codex & aot
+#!homepage = https://github.com/baitao24/loon-youtube-ai-translator
+#!tag = YouTube,字幕,AI
+#!system = iOS,iPadOS,macOS
+#!system_version = 15
+#!loon_version = 3.4.0(962)
+#!version = 0.1.0
+
+[Argument]
+provider = select,"Gemini","OpenAI-Compatible",tag=AI 服务商,desc=Gemini 使用 Google 原生 generateContent；其他兼容服务选择 OpenAI-Compatible
+api_key = input,"",tag=API Key,desc=只保存在 Loon 本机；请使用限额和受限密钥
+model = input,"gemini-3.6-flash",tag=模型名称,desc=例如 Gemini 模型或服务商提供的 OpenAI 兼容模型 ID
+base_url = input,"https://api.openai.com/v1",tag=OpenAI Base URL,desc=仅 OpenAI-Compatible 使用；可填写到 /v1 或完整 /chat/completions 地址
+gemini_base_url = input,"https://generativelanguage.googleapis.com/v1beta",tag=Gemini Base URL,desc=一般无需修改
+target_language = input,"zh-Hans",tag=默认目标语言,desc=建议使用 BCP 47，例如 zh-Hans、zh-Hant、en、ja；YouTube 菜单所选 tlang 优先
+auto_translate = switch,true,tag=自动翻译所有字幕,desc=开启后普通字幕请求也会转成 AI 双语；关闭后仅处理 YouTube 自动翻译请求
+show_only = switch,false,tag=只显示译文,desc=关闭时显示双语字幕
+position = select,"TranslationFirst","SourceFirst",tag=字幕顺序,desc=TranslationFirst 为译文在上，SourceFirst 为原文在上
+custom_prompt = input,"",tag=额外翻译要求,desc=可填写术语、称呼、风格；不要填写密钥
+max_batch_items = select,"60","40","80","120",tag=每批字幕条数,desc=默认 60；调低更稳，调高通常更省请求
+max_batch_chars = select,"5000","3000","8000","12000",tag=每批字符数,desc=默认 5000
+concurrency = select,"2","1","3","4",tag=并发请求数,desc=默认 2；遇到限流时改为 1
+retries = select,"2","0","1","3",tag=失败重试次数,desc=默认 2
+timeout_ms = select,"30000","15000","45000","60000",tag=单次 API 超时,desc=默认 30000 毫秒
+cache_entries = select,"6","0","3","10","20",tag=本地缓存视频数,desc=默认 6；0 表示关闭缓存
+log_level = select,"INFO","ERROR","WARN","DEBUG","OFF",tag=日志等级,desc=日志不会输出 API Key 或完整字幕
+
+[Script]
+http-request ^https?:\/\/(www|m)\.youtube\.com\/api\/timedtext(\?.+)?$ script-path=https://raw.githubusercontent.com/baitao24/loon-youtube-ai-translator/main/dist/yt-ai.bundle.js, timeout=10, tag=YouTube AI 字幕请求, argument=[{provider},{api_key},{model},{base_url},{gemini_base_url},{target_language},{auto_translate},{show_only},{position},{custom_prompt},{max_batch_items},{max_batch_chars},{concurrency},{retries},{timeout_ms},{cache_entries},{log_level}]
+http-response ^https?:\/\/(www|m)\.youtube\.com\/api\/timedtext(\?.+)?$ requires-body=true, max-size=0, script-path=https://raw.githubusercontent.com/baitao24/loon-youtube-ai-translator/main/dist/yt-ai.bundle.js, timeout=300, tag=YouTube AI 字幕响应, argument=[{provider},{api_key},{model},{base_url},{gemini_base_url},{target_language},{auto_translate},{show_only},{position},{custom_prompt},{max_batch_items},{max_batch_chars},{concurrency},{retries},{timeout_ms},{cache_entries},{log_level}]
+
+[MITM]
+hostname = www.youtube.com, m.youtube.com

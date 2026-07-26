@@ -1,0 +1,17 @@
+{
+  "name": "loon-youtube-ai-translator",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Loon YouTube AI bilingual subtitle plugin with OpenAI-compatible and Gemini providers",
+  "license": "MIT",
+  "type": "commonjs",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "check": "node --check src/yt-ai-core.js && node --check src/yt-ai-loon.js",
+    "test": "node --test test/*.test.js",
+    "verify": "npm run build && npm run check && npm test"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
