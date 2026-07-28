@@ -1,4 +1,4 @@
-// YouTube AI bilingual subtitles for Loon v0.2.0
+// YouTube AI bilingual subtitles for Loon v0.2.1
 // OpenAI-Compatible + Gemini native API
 // Never logs API keys or full subtitle payloads.
 (function initYouTubeAICore(root, factory) {
@@ -8,7 +8,7 @@
 })(typeof globalThis === "object" ? globalThis : this, function createYouTubeAICore() {
   "use strict";
 
-  const VERSION = "0.2.0";
+  const VERSION = "0.2.1";
   const QUERY_FLAG = "ytai";
   const QUERY_TARGET = "ytai_tlang";
   const CACHE_VERSION = "v2";
@@ -28,8 +28,8 @@
     maxBatchChars: 12000,
     concurrency: 3,
     retries: 0,
-    timeoutMs: 12000,
-    maxWaitMs: 15000,
+    timeoutMs: 5000,
+    maxWaitMs: 6500,
     thinkingLevel: "minimal",
     cacheEntries: 6,
     cacheMaxChars: 180000,
@@ -120,7 +120,7 @@
       maxWaitMs: clampInteger(
         raw.max_wait_ms ?? raw.maxWaitMs,
         DEFAULTS.maxWaitMs,
-        5000,
+        3000,
         45000
       ),
       thinkingLevel: ["minimal", "low", "medium", "high"].includes(
@@ -199,7 +199,6 @@
     }
 
     url.searchParams.delete("tlang");
-    url.searchParams.set("fmt", "json3");
     url.searchParams.set(QUERY_FLAG, "1");
     url.searchParams.set(QUERY_TARGET, targetLanguage);
     result.changed = url.toString() !== inputUrl;
@@ -241,6 +240,64 @@
       if (!text) return;
       cues.push({ id: eventIndex, eventIndex, text });
     });
+    return cues;
+  }
+
+  function decodeXmlEntities(value) {
+    return String(value || "").replace(
+      /&(#x[0-9a-f]+|#\d+|amp|lt|gt|quot|apos);/gi,
+      (match, entity) => {
+        const normalized = entity.toLowerCase();
+        if (normalized === "amp") return "&";
+        if (normalized === "lt") return "<";
+        if (normalized === "gt") return ">";
+        if (normalized === "quot") return "\"";
+        if (normalized === "apos") return "'";
+        const radix = normalized.startsWith("#x") ? 16 : 10;
+        const digits = normalized.slice(radix === 16 ? 2 : 1);
+        const codePoint = Number.parseInt(digits, radix);
+        if (!Number.isFinite(codePoint)) return match;
+        try {
+          return String.fromCodePoint(codePoint);
+        } catch (_) {
+          return match;
+        }
+      }
+    );
+  }
+
+  function escapeXml(value) {
+    return String(value || "")
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&apos;")
+      .replace(/\n/g, "&#10;");
+  }
+
+  function extractSrv3Cues(xml) {
+    const cues = [];
+    const pattern = /<p\b([^>]*)>([\s\S]*?)<\/p>/gi;
+    let match;
+    let paragraphIndex = 0;
+    while ((match = pattern.exec(String(xml || ""))) !== null) {
+      const text = cleanCueText(
+        decodeXmlEntities(
+          match[2]
+            .replace(/<br\s*\/?>/gi, "\n")
+            .replace(/<[^>]+>/g, "")
+        )
+      );
+      if (text) {
+        cues.push({
+          id: paragraphIndex,
+          paragraphIndex,
+          text
+        });
+      }
+      paragraphIndex += 1;
+    }
     return cues;
   }
 
@@ -473,6 +530,26 @@
     return body;
   }
 
+  function mergeSrv3Translations(xml, cues, translations, config) {
+    const byParagraph = new Map(
+      cues.map((cue) => [cue.paragraphIndex, cue])
+    );
+    const byId = new Map(translations.map((row) => [String(row.id), row.text]));
+    let paragraphIndex = 0;
+    return String(xml || "").replace(
+      /<p\b([^>]*)>([\s\S]*?)<\/p>/gi,
+      (paragraph, attributes) => {
+        const cue = byParagraph.get(paragraphIndex);
+        paragraphIndex += 1;
+        if (!cue) return paragraph;
+        const translated = byId.get(String(cue.id));
+        if (!translated) return paragraph;
+        const text = combineText(cue.text, translated, config);
+        return `<p${attributes}><s>${escapeXml(text)}</s></p>`;
+      }
+    );
+  }
+
   function fnv1a(value) {
     let hash = 0x811c9dc5;
     const text = String(value);
@@ -510,6 +587,7 @@
     shouldProcessResponse,
     responseLanguages,
     extractCues,
+    extractSrv3Cues,
     chunkCues,
     responseSchema,
     buildPrompts,
@@ -521,6 +599,7 @@
     validateTranslations,
     combineText,
     mergeTranslations,
+    mergeSrv3Translations,
     fnv1a,
     makeCacheKey
   };
@@ -533,8 +612,10 @@
   const CACHE_KEY = "@YT-AI-Translator.Cache.v1";
   const NOTICE_KEY = "@YT-AI-Translator.LastNotice.v1";
   const LOG_LEVELS = { OFF: 99, ERROR: 40, WARN: 30, INFO: 20, DEBUG: 10 };
+  const CLIENT_SAFE_MAX_WAIT_MS = 6500;
   const config = Core.normalizeConfig(typeof $argument === "undefined" ? {} : $argument);
-  const executionDeadline = Date.now() + config.maxWaitMs;
+  const executionDeadline =
+    Date.now() + Math.min(config.maxWaitMs, CLIENT_SAFE_MAX_WAIT_MS);
 
   function log(level, message) {
     if ((LOG_LEVELS[level] || 20) < (LOG_LEVELS[config.logLevel] || 20)) return;
@@ -572,15 +653,17 @@
     return $done({ url });
   }
 
-  function doneResponse(body) {
+  function doneResponse(body, contentType) {
     if (body === undefined) return $done({});
     const headers = Object.assign({}, $response.headers || {});
-    delete headers["Content-Length"];
-    delete headers["content-length"];
-    delete headers["Transfer-Encoding"];
-    delete headers["transfer-encoding"];
-    headers["Content-Type"] = "application/json; charset=utf-8";
-    headers["Content-Encoding"] = "identity";
+    Object.keys(headers).forEach((key) => {
+      if (/^(content-length|transfer-encoding|content-encoding)$/i.test(key)) {
+        delete headers[key];
+      }
+      if (/^content-type$/i.test(key)) delete headers[key];
+    });
+    headers["content-type"] = contentType || "application/json; charset=utf-8";
+    headers["content-encoding"] = "identity";
     return $done(Object.assign({}, $response, { headers, body }));
   }
 
@@ -756,13 +839,20 @@
       return;
     }
 
-    let body;
-    try {
-      body = JSON.parse($response.body || "{}");
-    } catch (error) {
-      throw new Error(`YouTube JSON3 parse failed: ${safeError(error)}`);
+    const sourceBody = String($response.body || "");
+    const isSrv3 = /^\s*(?:<\?xml[\s\S]*?\?>\s*)?<timedtext\b/i.test(sourceBody);
+    let body = sourceBody;
+    let cues;
+    if (isSrv3) {
+      cues = Core.extractSrv3Cues(sourceBody);
+    } else {
+      try {
+        body = JSON.parse(sourceBody || "{}");
+      } catch (error) {
+        throw new Error(`YouTube subtitle parse failed: ${safeError(error)}`);
+      }
+      cues = Core.extractCues(body);
     }
-    const cues = Core.extractCues(body);
     if (!cues.length) {
       log("INFO", "No translatable subtitle cues found");
       doneResponse();
@@ -797,8 +887,13 @@
       writeCache(cacheKey, translations);
     }
 
+    if (isSrv3) {
+      const merged = Core.mergeSrv3Translations(body, cues, translations, config);
+      doneResponse(merged, "application/xml; charset=utf-8");
+      return;
+    }
     const merged = Core.mergeTranslations(body, cues, translations, config);
-    doneResponse(JSON.stringify(merged));
+    doneResponse(JSON.stringify(merged), "application/json; charset=utf-8");
   }
 
   Promise.resolve()
