@@ -5,7 +5,7 @@
 })(typeof globalThis === "object" ? globalThis : this, function createYouTubeAICore() {
   "use strict";
 
-  const VERSION = "0.2.0";
+  const VERSION = "0.2.1";
   const QUERY_FLAG = "ytai";
   const QUERY_TARGET = "ytai_tlang";
   const CACHE_VERSION = "v2";
@@ -25,8 +25,8 @@
     maxBatchChars: 12000,
     concurrency: 3,
     retries: 0,
-    timeoutMs: 12000,
-    maxWaitMs: 15000,
+    timeoutMs: 5000,
+    maxWaitMs: 6500,
     thinkingLevel: "minimal",
     cacheEntries: 6,
     cacheMaxChars: 180000,
@@ -117,7 +117,7 @@
       maxWaitMs: clampInteger(
         raw.max_wait_ms ?? raw.maxWaitMs,
         DEFAULTS.maxWaitMs,
-        5000,
+        3000,
         45000
       ),
       thinkingLevel: ["minimal", "low", "medium", "high"].includes(
@@ -196,7 +196,6 @@
     }
 
     url.searchParams.delete("tlang");
-    url.searchParams.set("fmt", "json3");
     url.searchParams.set(QUERY_FLAG, "1");
     url.searchParams.set(QUERY_TARGET, targetLanguage);
     result.changed = url.toString() !== inputUrl;
@@ -238,6 +237,64 @@
       if (!text) return;
       cues.push({ id: eventIndex, eventIndex, text });
     });
+    return cues;
+  }
+
+  function decodeXmlEntities(value) {
+    return String(value || "").replace(
+      /&(#x[0-9a-f]+|#\d+|amp|lt|gt|quot|apos);/gi,
+      (match, entity) => {
+        const normalized = entity.toLowerCase();
+        if (normalized === "amp") return "&";
+        if (normalized === "lt") return "<";
+        if (normalized === "gt") return ">";
+        if (normalized === "quot") return "\"";
+        if (normalized === "apos") return "'";
+        const radix = normalized.startsWith("#x") ? 16 : 10;
+        const digits = normalized.slice(radix === 16 ? 2 : 1);
+        const codePoint = Number.parseInt(digits, radix);
+        if (!Number.isFinite(codePoint)) return match;
+        try {
+          return String.fromCodePoint(codePoint);
+        } catch (_) {
+          return match;
+        }
+      }
+    );
+  }
+
+  function escapeXml(value) {
+    return String(value || "")
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&apos;")
+      .replace(/\n/g, "&#10;");
+  }
+
+  function extractSrv3Cues(xml) {
+    const cues = [];
+    const pattern = /<p\b([^>]*)>([\s\S]*?)<\/p>/gi;
+    let match;
+    let paragraphIndex = 0;
+    while ((match = pattern.exec(String(xml || ""))) !== null) {
+      const text = cleanCueText(
+        decodeXmlEntities(
+          match[2]
+            .replace(/<br\s*\/?>/gi, "\n")
+            .replace(/<[^>]+>/g, "")
+        )
+      );
+      if (text) {
+        cues.push({
+          id: paragraphIndex,
+          paragraphIndex,
+          text
+        });
+      }
+      paragraphIndex += 1;
+    }
     return cues;
   }
 
@@ -470,6 +527,26 @@
     return body;
   }
 
+  function mergeSrv3Translations(xml, cues, translations, config) {
+    const byParagraph = new Map(
+      cues.map((cue) => [cue.paragraphIndex, cue])
+    );
+    const byId = new Map(translations.map((row) => [String(row.id), row.text]));
+    let paragraphIndex = 0;
+    return String(xml || "").replace(
+      /<p\b([^>]*)>([\s\S]*?)<\/p>/gi,
+      (paragraph, attributes) => {
+        const cue = byParagraph.get(paragraphIndex);
+        paragraphIndex += 1;
+        if (!cue) return paragraph;
+        const translated = byId.get(String(cue.id));
+        if (!translated) return paragraph;
+        const text = combineText(cue.text, translated, config);
+        return `<p${attributes}><s>${escapeXml(text)}</s></p>`;
+      }
+    );
+  }
+
   function fnv1a(value) {
     let hash = 0x811c9dc5;
     const text = String(value);
@@ -507,6 +584,7 @@
     shouldProcessResponse,
     responseLanguages,
     extractCues,
+    extractSrv3Cues,
     chunkCues,
     responseSchema,
     buildPrompts,
@@ -518,6 +596,7 @@
     validateTranslations,
     combineText,
     mergeTranslations,
+    mergeSrv3Translations,
     fnv1a,
     makeCacheKey
   };
