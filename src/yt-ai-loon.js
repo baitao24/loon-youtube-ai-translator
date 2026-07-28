@@ -5,8 +5,10 @@
   const CACHE_KEY = "@YT-AI-Translator.Cache.v1";
   const NOTICE_KEY = "@YT-AI-Translator.LastNotice.v1";
   const LOG_LEVELS = { OFF: 99, ERROR: 40, WARN: 30, INFO: 20, DEBUG: 10 };
+  const CLIENT_SAFE_MAX_WAIT_MS = 6500;
   const config = Core.normalizeConfig(typeof $argument === "undefined" ? {} : $argument);
-  const executionDeadline = Date.now() + config.maxWaitMs;
+  const executionDeadline =
+    Date.now() + Math.min(config.maxWaitMs, CLIENT_SAFE_MAX_WAIT_MS);
 
   function log(level, message) {
     if ((LOG_LEVELS[level] || 20) < (LOG_LEVELS[config.logLevel] || 20)) return;
@@ -44,15 +46,17 @@
     return $done({ url });
   }
 
-  function doneResponse(body) {
+  function doneResponse(body, contentType) {
     if (body === undefined) return $done({});
     const headers = Object.assign({}, $response.headers || {});
-    delete headers["Content-Length"];
-    delete headers["content-length"];
-    delete headers["Transfer-Encoding"];
-    delete headers["transfer-encoding"];
-    headers["Content-Type"] = "application/json; charset=utf-8";
-    headers["Content-Encoding"] = "identity";
+    Object.keys(headers).forEach((key) => {
+      if (/^(content-length|transfer-encoding|content-encoding)$/i.test(key)) {
+        delete headers[key];
+      }
+      if (/^content-type$/i.test(key)) delete headers[key];
+    });
+    headers["content-type"] = contentType || "application/json; charset=utf-8";
+    headers["content-encoding"] = "identity";
     return $done(Object.assign({}, $response, { headers, body }));
   }
 
@@ -228,13 +232,20 @@
       return;
     }
 
-    let body;
-    try {
-      body = JSON.parse($response.body || "{}");
-    } catch (error) {
-      throw new Error(`YouTube JSON3 parse failed: ${safeError(error)}`);
+    const sourceBody = String($response.body || "");
+    const isSrv3 = /^\s*(?:<\?xml[\s\S]*?\?>\s*)?<timedtext\b/i.test(sourceBody);
+    let body = sourceBody;
+    let cues;
+    if (isSrv3) {
+      cues = Core.extractSrv3Cues(sourceBody);
+    } else {
+      try {
+        body = JSON.parse(sourceBody || "{}");
+      } catch (error) {
+        throw new Error(`YouTube subtitle parse failed: ${safeError(error)}`);
+      }
+      cues = Core.extractCues(body);
     }
-    const cues = Core.extractCues(body);
     if (!cues.length) {
       log("INFO", "No translatable subtitle cues found");
       doneResponse();
@@ -269,8 +280,13 @@
       writeCache(cacheKey, translations);
     }
 
+    if (isSrv3) {
+      const merged = Core.mergeSrv3Translations(body, cues, translations, config);
+      doneResponse(merged, "application/xml; charset=utf-8");
+      return;
+    }
     const merged = Core.mergeTranslations(body, cues, translations, config);
-    doneResponse(JSON.stringify(merged));
+    doneResponse(JSON.stringify(merged), "application/json; charset=utf-8");
   }
 
   Promise.resolve()
