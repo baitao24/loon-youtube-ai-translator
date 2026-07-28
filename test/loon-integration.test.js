@@ -84,7 +84,14 @@ function timedTextBody() {
   });
 }
 
-test("Loon request context strips tlang and asks YouTube for JSON3", async () => {
+function srv3Body() {
+  return (
+    '<?xml version="1.0" encoding="utf-8" ?><timedtext format="3"><head><pen id="0"/></head>' +
+    '<body><p t="10" d="20"><s>Hello</s></p><p t="30" d="40"><s>World</s></p></body></timedtext>'
+  );
+}
+
+test("Loon request context strips tlang without changing YouTube's srv3 format", async () => {
   const input =
     "https://www.youtube.com/api/timedtext?v=abc&lang=en&tlang=zh-Hant&fmt=srv3";
   const result = await runLoon({
@@ -93,7 +100,7 @@ test("Loon request context strips tlang and asks YouTube for JSON3", async () =>
   });
   const url = new URL(result.doneValue.url);
   assert.equal(url.searchParams.has("tlang"), false);
-  assert.equal(url.searchParams.get("fmt"), "json3");
+  assert.equal(url.searchParams.get("fmt"), "srv3");
   assert.equal(url.searchParams.get("ytai_tlang"), "zh-Hant");
   assert.equal(Object.keys(result.doneValue).join(","), "url");
 });
@@ -123,7 +130,7 @@ test("Loon response context calls Gemini and returns bilingual JSON3", async () 
     }
   });
   assert.equal(apiRequest.headers["x-goog-api-key"], "test-secret");
-  assert.equal(apiRequest.timeout, 12000);
+  assert.ok(apiRequest.timeout >= 5000 && apiRequest.timeout <= 6000);
   assert.equal(apiRequest.body.includes("test-secret"), false);
   assert.equal(
     JSON.parse(apiRequest.body).generationConfig.responseFormat.text.mimeType,
@@ -134,6 +141,42 @@ test("Loon response context calls Gemini and returns bilingual JSON3", async () 
   assert.equal(output.events[1].segs[0].utf8, "世界\nWorld");
   assert.equal(output.events[0].tStartMs, 10);
   assert.equal(result.doneValue.headers["Content-Length"], undefined);
+});
+
+test("Loon response context keeps srv3 XML and returns bilingual paragraphs", async () => {
+  let apiRequest;
+  const requestUrl =
+    "https://www.youtube.com/api/timedtext?v=abc&lang=en&format=srv3&ytai=1&ytai_tlang=zh-Hans";
+  const result = await runLoon({
+    argument: config("Gemini"),
+    request: { url: requestUrl, method: "GET", headers: {} },
+    response: {
+      status: 200,
+      headers: {
+        "content-type": "text/xml",
+        "content-encoding": "gzip",
+        "content-length": "123"
+      },
+      body: srv3Body()
+    },
+    httpClient: {
+      post(request, callback) {
+        apiRequest = request;
+        const payload = {
+          translations: [{ id: 0, text: "你好" }, { id: 1, text: "世界" }]
+        };
+        callback(null, { status: 200 }, JSON.stringify({
+          candidates: [{ content: { parts: [{ text: JSON.stringify(payload) }] } }]
+        }));
+      }
+    }
+  });
+  assert.ok(apiRequest.timeout <= 6000);
+  assert.match(result.doneValue.body, /<p t="10" d="20"><s>你好&#10;Hello<\/s><\/p>/);
+  assert.match(result.doneValue.body, /<p t="30" d="40"><s>世界&#10;World<\/s><\/p>/);
+  assert.equal(result.doneValue.headers["content-type"], "application/xml; charset=utf-8");
+  assert.equal(result.doneValue.headers["content-encoding"], "identity");
+  assert.equal(result.doneValue.headers["content-length"], undefined);
 });
 
 test("Gemini retries with legacy responseSchema when responseFormat is rejected", async () => {
