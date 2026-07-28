@@ -57,7 +57,15 @@
     });
     headers["content-type"] = contentType || "application/json; charset=utf-8";
     headers["content-encoding"] = "identity";
+    headers["x-ytai-result"] = "translated";
     return $done(Object.assign({}, $response, { headers, body }));
+  }
+
+  function doneFallback(error) {
+    const headers = Object.assign({}, $response.headers || {});
+    headers["x-ytai-result"] = "fallback";
+    headers["x-ytai-error"] = encodeURIComponent(safeError(error)).slice(0, 240);
+    return $done({ headers });
   }
 
   function httpPost(request) {
@@ -296,6 +304,6 @@
       log("ERROR", message);
       notifyFallback(message);
       if (typeof $response === "undefined") doneRequest($request.url);
-      else doneResponse();
+      else doneFallback(message);
     });
 })();
