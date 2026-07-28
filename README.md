@@ -65,6 +65,8 @@ npm run build -- --script-url "https://example.com/yt-ai.bundle.js"
 
 插件通过 `x-goog-api-key` 请求头直连 Google，并使用公开 `generateContent` API 的 `responseMimeType` + `responseSchema` 约束字幕 ID。字幕响应必须在 YouTube 的短等待窗口内完成，因此 Gemini 只发起一次兼容请求，不再先试另一种格式后串行重试。Gemini 3.x 默认使用 `minimal` 思考等级；请求不携带新模型已弃用的 `temperature`、`top_p`、`top_k` 参数。API Key 不会写进请求正文、缓存或日志。
 
+Gemini 的单次 API 等待默认是 6000 毫秒，整次字幕处理仍在 6500 毫秒截止；从 0.2.4 及更早版本保存的 Gemini 默认值 5000 毫秒会自动迁移为 6000 毫秒。其他自定义超时值保持不变。
+
 ## OpenAI-Compatible 设置
 
 - AI 服务商：`OpenAI-Compatible`
