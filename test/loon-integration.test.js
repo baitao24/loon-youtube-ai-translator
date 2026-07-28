@@ -141,6 +141,7 @@ test("Loon response context calls Gemini and returns bilingual JSON3", async () 
   assert.equal(output.events[1].segs[0].utf8, "世界\nWorld");
   assert.equal(output.events[0].tStartMs, 10);
   assert.equal(result.doneValue.headers["Content-Length"], undefined);
+  assert.equal(result.doneValue.headers["x-ytai-result"], "translated");
 });
 
 test("Loon response context keeps srv3 XML and returns bilingual paragraphs", async () => {
@@ -264,7 +265,9 @@ test("API failure returns the untouched original response", async () => {
       }
     }
   });
-  assert.equal(Object.keys(result.doneValue).length, 0);
+  assert.equal(result.doneValue.headers.ETag, "abc");
+  assert.equal(result.doneValue.headers["x-ytai-result"], "fallback");
+  assert.match(decodeURIComponent(result.doneValue.headers["x-ytai-error"]), /API HTTP 500/);
   assert.equal(notificationCount, 1);
 });
 
@@ -287,7 +290,7 @@ test("stops starting API requests before the subtitle display deadline", async (
     }
   });
   assert.equal(calls, 1);
-  assert.equal(Object.keys(result.doneValue).length, 0);
+  assert.equal(result.doneValue.headers["x-ytai-result"], "fallback");
 });
 
 test("a second identical response uses persistent cache without another API call", async () => {
