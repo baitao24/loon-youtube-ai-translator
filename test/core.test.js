@@ -183,9 +183,16 @@ test("parses and validates OpenAI and Gemini structured responses", () => {
   });
   assert.deepEqual(Core.validateTranslations(openAI, batch), payload.translations);
   assert.deepEqual(Core.validateTranslations(gemini, batch), payload.translations);
+  assert.deepEqual(
+    Core.validateTranslations(
+      { translations: [payload.translations[1], payload.translations[0]] },
+      batch
+    ),
+    payload.translations
+  );
   assert.throws(
     () => Core.validateTranslations({ translations: [{ id: 1, text: "错位" }] }, [batch[0]]),
-    /id mismatch/
+    /Missing translation id/
   );
   assert.throws(
     () =>
