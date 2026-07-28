@@ -34,11 +34,11 @@ test("normalizes Loon arguments without exposing or changing the key", () => {
   assert.equal(config.autoTranslate, false);
   assert.equal(config.position, "SourceFirst");
   assert.equal(config.concurrency, 4);
-  assert.equal(config.maxWaitMs, 15000);
+  assert.equal(config.maxWaitMs, 6500);
   assert.equal(config.thinkingLevel, "minimal");
 });
 
-test("rewrites YouTube auto-translation to original JSON3 plus private markers", () => {
+test("rewrites YouTube auto-translation without changing the requested subtitle format", () => {
   const config = Core.normalizeConfig({
     provider: "Gemini",
     api_key: "key",
@@ -51,7 +51,7 @@ test("rewrites YouTube auto-translation to original JSON3 plus private markers",
   const url = new URL(result.url);
   assert.equal(result.changed, true);
   assert.equal(url.searchParams.has("tlang"), false);
-  assert.equal(url.searchParams.get("fmt"), "json3");
+  assert.equal(url.searchParams.get("fmt"), "srv3");
   assert.equal(url.searchParams.get("ytai"), "1");
   assert.equal(url.searchParams.get("ytai_tlang"), "zh-Hant");
 });
@@ -214,6 +214,28 @@ test("merges bilingual text without changing timing or unrelated fields", () => 
   assert.equal(body.events[0].segs[0].utf8, "你好世界\nHello world");
   assert.equal(body.events[0].wWinId, undefined);
   assert.equal(body.wireMagic, "pb3");
+});
+
+test("extracts and merges srv3 XML while preserving paragraph timing", () => {
+  const xml =
+    '<?xml version="1.0" encoding="utf-8" ?><timedtext format="3"><head><pen id="0"/></head>' +
+    '<body><p t="10" d="20"><s>Hello &amp; </s><s>world</s></p>' +
+    '<p t="30" d="40">How are you?</p><p t="70" d="10">&#8203;</p></body></timedtext>';
+  const cues = Core.extractSrv3Cues(xml);
+  assert.deepEqual(cues, [
+    { id: 0, paragraphIndex: 0, text: "Hello & world" },
+    { id: 1, paragraphIndex: 1, text: "How are you?" }
+  ]);
+  const merged = Core.mergeSrv3Translations(
+    xml,
+    cues,
+    [{ id: 0, text: "你好，世界" }, { id: 1, text: "你好吗？" }],
+    Core.normalizeConfig({ position: "TranslationFirst" })
+  );
+  assert.match(merged, /<p t="10" d="20"><s>你好，世界&#10;Hello &amp; world<\/s><\/p>/);
+  assert.match(merged, /<p t="30" d="40"><s>你好吗？&#10;How are you\?<\/s><\/p>/);
+  assert.match(merged, /<p t="70" d="10">&#8203;<\/p>/);
+  assert.equal((merged.match(/<p\b/g) || []).length, 3);
 });
 
 test("cache key changes with model, target, prompt, or subtitle text", () => {
