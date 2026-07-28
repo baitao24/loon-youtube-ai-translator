@@ -67,6 +67,9 @@ function config(provider) {
     target_language: "zh-Hans",
     retries: "0",
     concurrency: "1",
+    timeout_ms: "12000",
+    max_wait_ms: "15000",
+    thinking_level: "minimal",
     cache_entries: "3",
     log_level: "OFF"
   };
@@ -120,7 +123,7 @@ test("Loon response context calls Gemini and returns bilingual JSON3", async () 
     }
   });
   assert.equal(apiRequest.headers["x-goog-api-key"], "test-secret");
-  assert.equal(apiRequest.timeout, 30000);
+  assert.equal(apiRequest.timeout, 12000);
   assert.equal(apiRequest.body.includes("test-secret"), false);
   assert.equal(
     JSON.parse(apiRequest.body).generationConfig.responseFormat.text.mimeType,
@@ -222,7 +225,7 @@ test("API failure returns the untouched original response", async () => {
   assert.equal(notificationCount, 1);
 });
 
-test("stops starting API requests before the Loon script deadline", async () => {
+test("stops starting API requests before the subtitle display deadline", async () => {
   let now = 1000;
   let calls = 0;
   const requestUrl =
@@ -235,7 +238,7 @@ test("stops starting API requests before the Loon script deadline", async () => 
     httpClient: {
       post(_request, callback) {
         calls += 1;
-        now += 276000;
+        now += 14500;
         callback(null, { status: 500 }, "{\"error\":\"slow failure\"}");
       }
     }
