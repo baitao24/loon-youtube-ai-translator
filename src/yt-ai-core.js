@@ -5,7 +5,7 @@
 })(typeof globalThis === "object" ? globalThis : this, function createYouTubeAICore() {
   "use strict";
 
-  const VERSION = "0.2.1";
+  const VERSION = "0.2.2";
   const QUERY_FLAG = "ytai";
   const QUERY_TARGET = "ytai_tlang";
   const CACHE_VERSION = "v2";
@@ -288,7 +288,7 @@
       );
       if (text) {
         cues.push({
-          id: paragraphIndex,
+          id: cues.length,
           paragraphIndex,
           text
         });
@@ -492,11 +492,15 @@
     if (rows.length !== batch.length) {
       throw new Error(`Translation count mismatch: expected ${batch.length}, got ${rows.length}`);
     }
-    return batch.map((cue, index) => {
-      const row = rows[index];
-      if (String(row?.id) !== String(cue.id)) {
-        throw new Error(`Translation id mismatch at ${index}: expected ${cue.id}, got ${row?.id}`);
-      }
+    const byId = new Map();
+    rows.forEach((row) => {
+      const id = String(row?.id);
+      if (byId.has(id)) throw new Error(`Duplicate translation id: ${id}`);
+      byId.set(id, row);
+    });
+    return batch.map((cue) => {
+      const row = byId.get(String(cue.id));
+      if (!row) throw new Error(`Missing translation id: ${cue.id}`);
       const text = cleanCueText(row?.text);
       if (!text) throw new Error(`Translation text is empty for id ${cue.id}`);
       const maximumLength = Math.max(240, cue.text.length * 8);
