@@ -1,4 +1,4 @@
-// YouTube AI bilingual subtitles for Loon v0.2.2
+// YouTube AI bilingual subtitles for Loon v0.2.3
 // OpenAI-Compatible + Gemini native API
 // Never logs API keys or full subtitle payloads.
 (function initYouTubeAICore(root, factory) {
@@ -8,7 +8,7 @@
 })(typeof globalThis === "object" ? globalThis : this, function createYouTubeAICore() {
   "use strict";
 
-  const VERSION = "0.2.2";
+  const VERSION = "0.2.3";
   const QUERY_FLAG = "ytai";
   const QUERY_TARGET = "ytai_tlang";
   const CACHE_VERSION = "v2";
@@ -482,7 +482,10 @@
       const reason = body?.promptFeedback?.blockReason || body?.candidates?.[0]?.finishReason;
       throw new Error(`Gemini response has no text${reason ? ` (${reason})` : ""}`);
     }
-    const text = parts.map((part) => part?.text || "").join("");
+    const text = parts
+      .filter((part) => part?.thought !== true)
+      .map((part) => part?.text || "")
+      .join("");
     if (!text) throw new Error("Gemini response text is empty");
     return parseJsonText(text);
   }
