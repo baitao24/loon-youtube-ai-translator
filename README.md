@@ -63,7 +63,7 @@ npm run build -- --script-url "https://example.com/yt-ai.bundle.js"
 - Gemini Base URL：通常保持 `https://generativelanguage.googleapis.com/v1beta`
 - Gemini 思考等级：字幕翻译建议保持 `minimal`，减少首屏等待
 
-插件通过 `x-goog-api-key` 请求头直连 Google。最新模型优先使用 `responseFormat.text.schema` 约束字幕 ID；若服务端返回 400/422，会自动改用旧模型的 `responseMimeType` + `responseSchema` 格式重试。Gemini 3.x 默认使用 `minimal` 思考等级；请求不携带新模型已弃用的 `temperature`、`top_p`、`top_k` 参数。API Key 不会写进请求正文、缓存或日志。
+插件通过 `x-goog-api-key` 请求头直连 Google，并使用公开 `generateContent` API 的 `responseMimeType` + `responseSchema` 约束字幕 ID。字幕响应必须在 YouTube 的短等待窗口内完成，因此 Gemini 只发起一次兼容请求，不再先试另一种格式后串行重试。Gemini 3.x 默认使用 `minimal` 思考等级；请求不携带新模型已弃用的 `temperature`、`top_p`、`top_k` 参数。API Key 不会写进请求正文、缓存或日志。
 
 ## OpenAI-Compatible 设置
 
