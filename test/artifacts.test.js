@@ -36,9 +36,11 @@ test("local Loon plugin has complete arguments, safe defaults, and no template m
   assert.match(plugin, /script-path=yt-ai\.bundle\.js/);
   assert.match(plugin, /provider = select,"Gemini","OpenAI-Compatible"/);
   assert.match(plugin, /model = input,"gemini-3\.6-flash"/);
-  assert.match(plugin, /concurrency = select,"2","1","3","4"/);
-  assert.match(plugin, /retries = select,"2","0","1","3"/);
+  assert.match(plugin, /thinking_level = select,"minimal","low","medium","high"/);
+  assert.match(plugin, /concurrency = select,"3","1","2","4"/);
+  assert.match(plugin, /retries = select,"0","1","2","3"/);
+  assert.match(plugin, /max_wait_ms = select,"15000","8000","20000","30000"/);
   assert.match(plugin, /cache_entries = select,"6","0","3","10","20"/);
-  assert.match(plugin, /timeout=300/);
+  assert.match(plugin, /timeout=30/);
   assert.match(plugin, /\[MITM\][\s\S]*www\.youtube\.com, m\.youtube\.com/);
 });
