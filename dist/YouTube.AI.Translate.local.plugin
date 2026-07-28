@@ -6,7 +6,7 @@
 #!system = iOS,iPadOS,macOS
 #!system_version = 15
 #!loon_version = 3.4.0(962)
-#!version = 0.2.4
+#!version = 0.2.5
 
 [Argument]
 provider = select,"Gemini","OpenAI-Compatible",tag=AI 服务商,desc=Gemini 使用 Google 原生 generateContent；其他兼容服务选择 OpenAI-Compatible
@@ -24,7 +24,7 @@ max_batch_items = select,"120","60","80","150",tag=每批字幕条数,desc=默�
 max_batch_chars = select,"12000","5000","8000","16000",tag=每批字符数,desc=默认 12000
 concurrency = select,"3","1","2","4",tag=并发请求数,desc=默认 3；遇到限流时改为 1
 retries = select,"0","1","2","3",tag=失败重试次数,desc=默认 0；字幕显示链路优先快速回退
-timeout_ms = select,"5000","4000","6000","8000",tag=单次 API 超时,desc=默认 5000 毫秒；需短于 YouTube 客户端等待上限
+timeout_ms = select,"6000","4000","5000","8000",tag=单次 API 超时,desc=Gemini 默认 6000 毫秒；整次处理仍受字幕最大等待限制
 max_wait_ms = select,"6500","5000","6000","7500",tag=字幕最大等待,desc=默认 6500 毫秒；脚本始终在客户端约 8 秒超时前结束
 cache_entries = select,"6","0","3","10","20",tag=本地缓存视频数,desc=默认 6；0 表示关闭缓存
 log_level = select,"INFO","ERROR","WARN","DEBUG","OFF",tag=日志等级,desc=日志不会输出 API Key 或完整字幕
