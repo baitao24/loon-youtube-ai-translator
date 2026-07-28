@@ -38,6 +38,18 @@ test("normalizes Loon arguments without exposing or changing the key", () => {
   assert.equal(config.thinkingLevel, "minimal");
 });
 
+test("migrates only the old Gemini timeout default to six seconds", () => {
+  const gemini = Core.normalizeConfig({ provider: "Gemini", timeout_ms: "5000" });
+  const openai = Core.normalizeConfig({
+    provider: "OpenAI-Compatible",
+    timeout_ms: "5000"
+  });
+  const customGemini = Core.normalizeConfig({ provider: "Gemini", timeout_ms: "4000" });
+  assert.equal(gemini.timeoutMs, 6000);
+  assert.equal(openai.timeoutMs, 5000);
+  assert.equal(customGemini.timeoutMs, 4000);
+});
+
 test("rewrites YouTube auto-translation without changing the requested subtitle format", () => {
   const config = Core.normalizeConfig({
     provider: "Gemini",
