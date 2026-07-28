@@ -4,10 +4,9 @@
   const Core = globalThis.YTAI;
   const CACHE_KEY = "@YT-AI-Translator.Cache.v1";
   const NOTICE_KEY = "@YT-AI-Translator.LastNotice.v1";
-  const EXECUTION_BUDGET_MS = 280000;
-  const executionDeadline = Date.now() + EXECUTION_BUDGET_MS;
   const LOG_LEVELS = { OFF: 99, ERROR: 40, WARN: 30, INFO: 20, DEBUG: 10 };
   const config = Core.normalizeConfig(typeof $argument === "undefined" ? {} : $argument);
+  const executionDeadline = Date.now() + config.maxWaitMs;
 
   function log(level, message) {
     if ((LOG_LEVELS[level] || 20) < (LOG_LEVELS[config.logLevel] || 20)) return;
@@ -63,7 +62,16 @@
         reject(new Error("Loon $httpClient.post is unavailable"));
         return;
       }
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        reject(new Error(`API timeout after ${request.timeout}ms`));
+      }, request.timeout + 250);
       $httpClient.post(request, (error, response, body) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
         if (error) {
           reject(new Error(String(error)));
           return;
@@ -86,11 +94,11 @@
 
   function requestConfigWithinDeadline() {
     const remaining = executionDeadline - Date.now();
-    if (remaining <= 5000) {
-      throw new Error("Translation stopped before the Loon script deadline");
+    if (remaining <= 1000) {
+      throw new Error("Translation exceeded the subtitle display deadline");
     }
     return Object.assign({}, config, {
-      timeoutMs: Math.min(config.timeoutMs, remaining - 2000)
+      timeoutMs: Math.min(config.timeoutMs, Math.max(1000, remaining - 500))
     });
   }
 
