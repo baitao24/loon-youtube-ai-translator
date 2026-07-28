@@ -1,4 +1,4 @@
-// YouTube AI bilingual subtitles for Loon v0.1.0
+// YouTube AI bilingual subtitles for Loon v0.2.0
 // OpenAI-Compatible + Gemini native API
 // Never logs API keys or full subtitle payloads.
 (function initYouTubeAICore(root, factory) {
@@ -8,10 +8,10 @@
 })(typeof globalThis === "object" ? globalThis : this, function createYouTubeAICore() {
   "use strict";
 
-  const VERSION = "0.1.0";
+  const VERSION = "0.2.0";
   const QUERY_FLAG = "ytai";
   const QUERY_TARGET = "ytai_tlang";
-  const CACHE_VERSION = "v1";
+  const CACHE_VERSION = "v2";
 
   const DEFAULTS = Object.freeze({
     provider: "Gemini",
@@ -24,11 +24,13 @@
     showOnly: false,
     position: "TranslationFirst",
     customPrompt: "",
-    maxBatchItems: 60,
-    maxBatchChars: 5000,
-    concurrency: 2,
-    retries: 2,
-    timeoutMs: 30000,
+    maxBatchItems: 120,
+    maxBatchChars: 12000,
+    concurrency: 3,
+    retries: 0,
+    timeoutMs: 12000,
+    maxWaitMs: 15000,
+    thinkingLevel: "minimal",
     cacheEntries: 6,
     cacheMaxChars: 180000,
     logLevel: "INFO"
@@ -115,6 +117,19 @@
       concurrency: clampInteger(raw.concurrency, DEFAULTS.concurrency, 1, 4),
       retries: clampInteger(raw.retries, DEFAULTS.retries, 0, 4),
       timeoutMs: clampInteger(raw.timeout_ms ?? raw.timeoutMs, DEFAULTS.timeoutMs, 3000, 60000),
+      maxWaitMs: clampInteger(
+        raw.max_wait_ms ?? raw.maxWaitMs,
+        DEFAULTS.maxWaitMs,
+        5000,
+        45000
+      ),
+      thinkingLevel: ["minimal", "low", "medium", "high"].includes(
+        String(raw.thinking_level || raw.thinkingLevel || DEFAULTS.thinkingLevel).toLowerCase()
+      )
+        ? String(
+            raw.thinking_level || raw.thinkingLevel || DEFAULTS.thinkingLevel
+          ).toLowerCase()
+        : DEFAULTS.thinkingLevel,
       cacheEntries: clampInteger(
         raw.cache_entries ?? raw.cacheEntries,
         DEFAULTS.cacheEntries,
@@ -351,7 +366,8 @@
     const generationConfig = useLegacyFormat
       ? {
           responseMimeType: "application/json",
-          responseSchema: responseSchema()
+          responseSchema: responseSchema(),
+          thinkingConfig: { thinkingLevel: config.thinkingLevel }
         }
       : {
           responseFormat: {
@@ -359,7 +375,8 @@
               mimeType: "application/json",
               schema: responseSchema()
             }
-          }
+          },
+          thinkingConfig: { thinkingLevel: config.thinkingLevel }
         };
     return {
       url: `${parsedBaseUrl.toString().replace(/\/+$/, "")}/models/${model}:generateContent`,
@@ -515,10 +532,9 @@
   const Core = globalThis.YTAI;
   const CACHE_KEY = "@YT-AI-Translator.Cache.v1";
   const NOTICE_KEY = "@YT-AI-Translator.LastNotice.v1";
-  const EXECUTION_BUDGET_MS = 280000;
-  const executionDeadline = Date.now() + EXECUTION_BUDGET_MS;
   const LOG_LEVELS = { OFF: 99, ERROR: 40, WARN: 30, INFO: 20, DEBUG: 10 };
   const config = Core.normalizeConfig(typeof $argument === "undefined" ? {} : $argument);
+  const executionDeadline = Date.now() + config.maxWaitMs;
 
   function log(level, message) {
     if ((LOG_LEVELS[level] || 20) < (LOG_LEVELS[config.logLevel] || 20)) return;
@@ -574,7 +590,16 @@
         reject(new Error("Loon $httpClient.post is unavailable"));
         return;
       }
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        reject(new Error(`API timeout after ${request.timeout}ms`));
+      }, request.timeout + 250);
       $httpClient.post(request, (error, response, body) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
         if (error) {
           reject(new Error(String(error)));
           return;
@@ -597,11 +622,11 @@
 
   function requestConfigWithinDeadline() {
     const remaining = executionDeadline - Date.now();
-    if (remaining <= 5000) {
-      throw new Error("Translation stopped before the Loon script deadline");
+    if (remaining <= 1000) {
+      throw new Error("Translation exceeded the subtitle display deadline");
     }
     return Object.assign({}, config, {
-      timeoutMs: Math.min(config.timeoutMs, remaining - 2000)
+      timeoutMs: Math.min(config.timeoutMs, Math.max(1000, remaining - 500))
     });
   }
 
