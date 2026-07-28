@@ -1,8 +1,8 @@
 {
   "name": "loon-youtube-ai-translator",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "bundle": "yt-ai.bundle.js",
-  "sha256": "edb8d6770a5c34e212b5ece5598a847c3ecf829a27a84653a03ea982b80ec50a",
+  "sha256": "4c097529b116313411761d3552aab67c6dfd85f4b72e83296f9d507c466b0f20",
   "localPlugin": "YouTube.AI.Translate.local.plugin",
   "remotePlugin": "YouTube.AI.Translate.remote.plugin",
   "scriptUrl": "https://raw.githubusercontent.com/baitao24/loon-youtube-ai-translator/main/dist/yt-ai.bundle.js"
