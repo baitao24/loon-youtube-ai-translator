@@ -17,7 +17,7 @@
 - 只翻译视频已有的人工字幕或 YouTube 自动字幕，不包含语音识别（ASR）。
 - 首版不保证 YouTube Music、直播、Shorts 独立字幕流程或 tvOS。
 - Loon 是网络层工具，设置入口位于 Loon，不能向 YouTube App 内加入模型按钮。
-- AI 翻译比 Google Translate 慢。首次打开长视频字幕可能等待较久，之后相同内容可命中缓存。
+- AI 翻译比 Google Translate 慢。插件默认最多等待 15 秒；超过上限会立即恢复 YouTube 原字幕，避免字幕一直空白。
 - Loon 插件的 `input` 不是系统钥匙串。请使用有额度限制、可随时撤销的 API Key。
 
 ## 安装
@@ -61,8 +61,9 @@ npm run build -- --script-url "https://example.com/yt-ai.bundle.js"
 - API Key：Google AI Studio 创建的 Gemini API Key
 - 模型：默认 `gemini-3.6-flash`；若更重视低延迟和成本，可改为 `gemini-3.5-flash-lite`，也可填写账号实际可用的其他模型 ID
 - Gemini Base URL：通常保持 `https://generativelanguage.googleapis.com/v1beta`
+- Gemini 思考等级：字幕翻译建议保持 `minimal`，减少首屏等待
 
-插件通过 `x-goog-api-key` 请求头直连 Google。最新模型优先使用 `responseFormat.text.schema` 约束字幕 ID；若服务端返回 400/422，会自动改用旧模型的 `responseMimeType` + `responseSchema` 格式重试。请求不携带 Gemini 新模型已弃用的 `temperature`、`top_p`、`top_k` 参数；API Key 不会写进请求正文、缓存或日志。
+插件通过 `x-goog-api-key` 请求头直连 Google。最新模型优先使用 `responseFormat.text.schema` 约束字幕 ID；若服务端返回 400/422，会自动改用旧模型的 `responseMimeType` + `responseSchema` 格式重试。Gemini 3.x 默认使用 `minimal` 思考等级；请求不携带新模型已弃用的 `temperature`、`top_p`、`top_k` 参数。API Key 不会写进请求正文、缓存或日志。
 
 ## OpenAI-Compatible 设置
 
@@ -110,9 +111,9 @@ npm run build -- --script-url "https://example.com/yt-ai.bundle.js"
 字幕一直显示原文：
 
 - 这是安全回退行为，通常表示 API 请求或输出校验失败。
-- 长视频可把并发改为 `1`、每批字符数改为 `3000`，或选择更快的模型。
+- 首次翻译默认最多等待 15 秒，超过后不会继续阻塞 YouTube 字幕。
+- 长视频优先选择 `gemini-3.5-flash-lite`，或把“字幕最大等待”调整为 20–30 秒。
 - 网络超时后的重试可能让服务商收到重复请求并产生重复计费；额度敏感时可把重试次数改为 `0`。
-- 整次响应处理最多使用约 280 秒，接近 Loon 的 300 秒脚本上限时会停止新请求并回退原字幕。
 
 ## 开发与验证
 
