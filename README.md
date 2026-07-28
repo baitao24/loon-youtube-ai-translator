@@ -1,6 +1,6 @@
 # YouTube AI 双语字幕（Loon）
 
-一个直接运行在 Loon 中的 YouTube AI 字幕翻译插件。它会拦截 YouTube 已有字幕，改为请求原始 JSON3 字幕，再调用用户选择的 AI 服务翻译并合成为双语字幕。
+一个直接运行在 Loon 中的 YouTube AI 字幕翻译插件。它会拦截 YouTube 已有字幕，保留客户端请求的 JSON3 或 srv3 格式，再调用用户选择的 AI 服务翻译并合成为双语字幕。
 
 支持：
 
@@ -17,7 +17,7 @@
 - 只翻译视频已有的人工字幕或 YouTube 自动字幕，不包含语音识别（ASR）。
 - 首版不保证 YouTube Music、直播、Shorts 独立字幕流程或 tvOS。
 - Loon 是网络层工具，设置入口位于 Loon，不能向 YouTube App 内加入模型按钮。
-- AI 翻译比 Google Translate 慢。插件默认最多等待 15 秒；超过上限会立即恢复 YouTube 原字幕，避免字幕一直空白。
+- AI 翻译比 Google Translate 慢。iPhone YouTube 大约 8 秒就会放弃字幕请求，因此插件默认最多等待 6.5 秒；超过上限会立即恢复 YouTube 原字幕。
 - Loon 插件的 `input` 不是系统钥匙串。请使用有额度限制、可随时撤销的 API Key。
 
 ## 安装
@@ -83,7 +83,7 @@ npm run build -- --script-url "https://example.com/yt-ai.bundle.js"
 - 返回与输入完全相同的 ID 数量和顺序
 - 不合并、不拆分、不遗漏字幕
 
-返回后再次检查条数、ID 和非空文本。任何一批校验失败都会放弃整次修改并返回原字幕；开始时间、持续时间和无关 JSON3 字段不会被改动。
+返回后再次检查条数、ID 和非空文本。任何一批校验失败都会放弃整次修改并返回原字幕；JSON3 和 srv3 的开始时间、持续时间及无关字段不会被改动。
 
 ## 自动模式和 YouTube 菜单
 
@@ -111,8 +111,8 @@ npm run build -- --script-url "https://example.com/yt-ai.bundle.js"
 字幕一直显示原文：
 
 - 这是安全回退行为，通常表示 API 请求或输出校验失败。
-- 首次翻译默认最多等待 15 秒，超过后不会继续阻塞 YouTube 字幕。
-- 长视频优先选择 `gemini-3.5-flash-lite`，或把“字幕最大等待”调整为 20–30 秒。
+- 首次翻译默认最多等待 6.5 秒，超过后不会继续阻塞 YouTube 字幕。
+- 长视频优先选择 `gemini-3.5-flash-lite`；不建议把等待时间调高，iPhone YouTube 通常会在约 8 秒时先行报错。
 - 网络超时后的重试可能让服务商收到重复请求并产生重复计费；额度敏感时可把重试次数改为 `0`。
 
 ## 开发与验证
