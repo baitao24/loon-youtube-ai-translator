@@ -133,8 +133,12 @@ test("Loon response context calls Gemini and returns bilingual JSON3", async () 
   assert.ok(apiRequest.timeout >= 5000 && apiRequest.timeout <= 6000);
   assert.equal(apiRequest.body.includes("test-secret"), false);
   assert.equal(
-    JSON.parse(apiRequest.body).generationConfig.responseFormat.text.mimeType,
+    JSON.parse(apiRequest.body).generationConfig.responseMimeType,
     "application/json"
+  );
+  assert.deepEqual(
+    JSON.parse(apiRequest.body).generationConfig.responseSchema.required,
+    ["translations"]
   );
   const output = JSON.parse(result.doneValue.body);
   assert.equal(output.events[0].segs[0].utf8, "你好\nHello");
@@ -180,7 +184,7 @@ test("Loon response context keeps srv3 XML and returns bilingual paragraphs", as
   assert.equal(result.doneValue.headers["content-length"], undefined);
 });
 
-test("Gemini retries with legacy responseSchema when responseFormat is rejected", async () => {
+test("Gemini uses one compatible responseSchema request within the subtitle deadline", async () => {
   const bodies = [];
   const requestUrl =
     "https://www.youtube.com/api/timedtext?v=gemini-legacy&lang=en&fmt=json3&ytai=1&ytai_tlang=zh-Hans";
@@ -191,10 +195,6 @@ test("Gemini retries with legacy responseSchema when responseFormat is rejected"
     httpClient: {
       post(request, callback) {
         bodies.push(JSON.parse(request.body));
-        if (bodies.length === 1) {
-          callback(null, { status: 400 }, "{\"error\":\"unknown responseFormat\"}");
-          return;
-        }
         const payload = {
           translations: [{ id: 0, text: "你好" }, { id: 1, text: "世界" }]
         };
@@ -204,10 +204,9 @@ test("Gemini retries with legacy responseSchema when responseFormat is rejected"
       }
     }
   });
-  assert.equal(bodies.length, 2);
-  assert.equal(bodies[0].generationConfig.responseSchema, undefined);
+  assert.equal(bodies.length, 1);
   assert.deepEqual(
-    bodies[1].generationConfig.responseSchema.required,
+    bodies[0].generationConfig.responseSchema.required,
     ["translations"]
   );
   assert.equal(JSON.parse(result.doneValue.body).events[0].segs[0].utf8, "你好\nHello");
