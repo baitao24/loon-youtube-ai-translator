@@ -1,4 +1,4 @@
-// YouTube AI bilingual subtitles for Loon v0.2.3
+// YouTube AI bilingual subtitles for Loon v0.2.4
 // OpenAI-Compatible + Gemini native API
 // Never logs API keys or full subtitle payloads.
 (function initYouTubeAICore(root, factory) {
@@ -8,7 +8,7 @@
 })(typeof globalThis === "object" ? globalThis : this, function createYouTubeAICore() {
   "use strict";
 
-  const VERSION = "0.2.3";
+  const VERSION = "0.2.4";
   const QUERY_FLAG = "ytai";
   const QUERY_TARGET = "ytai_tlang";
   const CACHE_VERSION = "v2";
@@ -734,22 +734,13 @@
       try {
         const requestConfig = requestConfigWithinDeadline();
         if (config.provider === "Gemini") {
-          try {
-            const request = Core.createGeminiRequest(requestConfig, batch, languages, false);
-            const raw = await httpPost(request);
-            return Core.validateTranslations(Core.parseGeminiResponse(raw), batch);
-          } catch (error) {
-            if (![400, 422].includes(error?.status)) throw error;
-            log("DEBUG", "Gemini rejected responseFormat; retrying with legacy responseSchema");
-            const request = Core.createGeminiRequest(
-              requestConfigWithinDeadline(),
-              batch,
-              languages,
-              true
-            );
-            const raw = await httpPost(request);
-            return Core.validateTranslations(Core.parseGeminiResponse(raw), batch);
-          }
+          // YouTube only gives response scripts a few seconds. The public Gemini
+          // generateContent API accepts responseMimeType + responseSchema across
+          // current model families, so use that format directly instead of
+          // spending the subtitle deadline on a speculative responseFormat call.
+          const request = Core.createGeminiRequest(requestConfig, batch, languages, true);
+          const raw = await httpPost(request);
+          return Core.validateTranslations(Core.parseGeminiResponse(raw), batch);
         }
 
         try {
