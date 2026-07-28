@@ -5,10 +5,10 @@
 })(typeof globalThis === "object" ? globalThis : this, function createYouTubeAICore() {
   "use strict";
 
-  const VERSION = "0.1.0";
+  const VERSION = "0.2.0";
   const QUERY_FLAG = "ytai";
   const QUERY_TARGET = "ytai_tlang";
-  const CACHE_VERSION = "v1";
+  const CACHE_VERSION = "v2";
 
   const DEFAULTS = Object.freeze({
     provider: "Gemini",
@@ -21,11 +21,13 @@
     showOnly: false,
     position: "TranslationFirst",
     customPrompt: "",
-    maxBatchItems: 60,
-    maxBatchChars: 5000,
-    concurrency: 2,
-    retries: 2,
-    timeoutMs: 30000,
+    maxBatchItems: 120,
+    maxBatchChars: 12000,
+    concurrency: 3,
+    retries: 0,
+    timeoutMs: 12000,
+    maxWaitMs: 15000,
+    thinkingLevel: "minimal",
     cacheEntries: 6,
     cacheMaxChars: 180000,
     logLevel: "INFO"
@@ -112,6 +114,19 @@
       concurrency: clampInteger(raw.concurrency, DEFAULTS.concurrency, 1, 4),
       retries: clampInteger(raw.retries, DEFAULTS.retries, 0, 4),
       timeoutMs: clampInteger(raw.timeout_ms ?? raw.timeoutMs, DEFAULTS.timeoutMs, 3000, 60000),
+      maxWaitMs: clampInteger(
+        raw.max_wait_ms ?? raw.maxWaitMs,
+        DEFAULTS.maxWaitMs,
+        5000,
+        45000
+      ),
+      thinkingLevel: ["minimal", "low", "medium", "high"].includes(
+        String(raw.thinking_level || raw.thinkingLevel || DEFAULTS.thinkingLevel).toLowerCase()
+      )
+        ? String(
+            raw.thinking_level || raw.thinkingLevel || DEFAULTS.thinkingLevel
+          ).toLowerCase()
+        : DEFAULTS.thinkingLevel,
       cacheEntries: clampInteger(
         raw.cache_entries ?? raw.cacheEntries,
         DEFAULTS.cacheEntries,
@@ -348,7 +363,8 @@
     const generationConfig = useLegacyFormat
       ? {
           responseMimeType: "application/json",
-          responseSchema: responseSchema()
+          responseSchema: responseSchema(),
+          thinkingConfig: { thinkingLevel: config.thinkingLevel }
         }
       : {
           responseFormat: {
@@ -356,7 +372,8 @@
               mimeType: "application/json",
               schema: responseSchema()
             }
-          }
+          },
+          thinkingConfig: { thinkingLevel: config.thinkingLevel }
         };
     return {
       url: `${parsedBaseUrl.toString().replace(/\/+$/, "")}/models/${model}:generateContent`,
