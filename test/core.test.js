@@ -34,6 +34,8 @@ test("normalizes Loon arguments without exposing or changing the key", () => {
   assert.equal(config.autoTranslate, false);
   assert.equal(config.position, "SourceFirst");
   assert.equal(config.concurrency, 4);
+  assert.equal(config.maxWaitMs, 15000);
+  assert.equal(config.thinkingLevel, "minimal");
 });
 
 test("rewrites YouTube auto-translation to original JSON3 plus private markers", () => {
@@ -141,6 +143,7 @@ test("builds native Gemini generateContent request with response schema", () => 
   assert.equal(request.headers["x-goog-api-key"], "gemini-secret");
   assert.equal(request.body.includes("gemini-secret"), false);
   assert.equal(body.generationConfig.temperature, undefined);
+  assert.equal(body.generationConfig.thinkingConfig.thinkingLevel, "minimal");
   assert.equal(body.generationConfig.responseFormat.text.mimeType, "application/json");
   assert.deepEqual(body.generationConfig.responseFormat.text.schema.required, ["translations"]);
   const legacyBody = JSON.parse(
@@ -152,6 +155,7 @@ test("builds native Gemini generateContent request with response schema", () => 
     ).body
   );
   assert.equal(legacyBody.generationConfig.responseMimeType, "application/json");
+  assert.equal(legacyBody.generationConfig.thinkingConfig.thinkingLevel, "minimal");
   assert.deepEqual(legacyBody.generationConfig.responseSchema.required, ["translations"]);
   assert.throws(
     () =>
