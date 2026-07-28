@@ -179,7 +179,14 @@ test("parses and validates OpenAI and Gemini structured responses", () => {
     choices: [{ message: { content: `\`\`\`json\n${JSON.stringify(payload)}\n\`\`\`` } }]
   });
   const gemini = Core.parseGeminiResponse({
-    candidates: [{ content: { parts: [{ text: JSON.stringify(payload) }] } }]
+    candidates: [{
+      content: {
+        parts: [
+          { thought: true, text: "internal reasoning that is not JSON" },
+          { text: JSON.stringify(payload) }
+        ]
+      }
+    }]
   });
   assert.deepEqual(Core.validateTranslations(openAI, batch), payload.translations);
   assert.deepEqual(Core.validateTranslations(gemini, batch), payload.translations);
