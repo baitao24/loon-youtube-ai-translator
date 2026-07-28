@@ -1,4 +1,4 @@
-// YouTube AI bilingual subtitles for Loon v0.2.4
+// YouTube AI bilingual subtitles for Loon v0.2.5
 // OpenAI-Compatible + Gemini native API
 // Never logs API keys or full subtitle payloads.
 (function initYouTubeAICore(root, factory) {
@@ -8,7 +8,7 @@
 })(typeof globalThis === "object" ? globalThis : this, function createYouTubeAICore() {
   "use strict";
 
-  const VERSION = "0.2.4";
+  const VERSION = "0.2.5";
   const QUERY_FLAG = "ytai";
   const QUERY_TARGET = "ytai_tlang";
   const CACHE_VERSION = "v2";
@@ -28,7 +28,7 @@
     maxBatchChars: 12000,
     concurrency: 3,
     retries: 0,
-    timeoutMs: 5000,
+    timeoutMs: 6000,
     maxWaitMs: 6500,
     thinkingLevel: "minimal",
     cacheEntries: 6,
@@ -84,6 +84,12 @@
     const position = positionRaw.includes("source") || positionRaw === "forward"
       ? "SourceFirst"
       : "TranslationFirst";
+    const configuredTimeoutMs = clampInteger(
+      raw.timeout_ms ?? raw.timeoutMs,
+      DEFAULTS.timeoutMs,
+      3000,
+      60000
+    );
     return {
       provider,
       apiKey: String(raw.api_key || raw.apiKey || raw.APIKey || DEFAULTS.apiKey).trim(),
@@ -116,7 +122,13 @@
       ),
       concurrency: clampInteger(raw.concurrency, DEFAULTS.concurrency, 1, 4),
       retries: clampInteger(raw.retries, DEFAULTS.retries, 0, 4),
-      timeoutMs: clampInteger(raw.timeout_ms ?? raw.timeoutMs, DEFAULTS.timeoutMs, 3000, 60000),
+      // 5000 ms was the Gemini default through 0.2.4. On a real iPhone it
+      // cancelled a single otherwise valid response at ~5.5 s, so migrate that
+      // old default while keeping explicitly shorter/longer values untouched.
+      timeoutMs:
+        provider === "Gemini" && configuredTimeoutMs === 5000
+          ? DEFAULTS.timeoutMs
+          : configuredTimeoutMs,
       maxWaitMs: clampInteger(
         raw.max_wait_ms ?? raw.maxWaitMs,
         DEFAULTS.maxWaitMs,
