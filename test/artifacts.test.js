@@ -47,12 +47,21 @@ test("existing public subscription filenames remain valid and use the new runtim
 
   assert.equal(legacyRemotePlugin, remotePlugin);
   assert.equal(legacyLocalPlugin, localPlugin);
-  assert.match(remotePlugin, /^#!version = 0\.3\.0$/m);
+  assert.match(remotePlugin, /^#!version = 0\.3\.1$/m);
   assert.match(
     remotePlugin,
     /script-path=https:\/\/raw\.githubusercontent\.com\/baitao24\/loon-youtube-ai-translator\/main\/dist\/dualsubs-ai\.bundle\.js/
   );
-  assert.match(remotePlugin, /subtype=Official/);
+  const responseRule = remotePlugin
+    .split("\n")
+    .find(
+      (line) =>
+        line.startsWith("http-response ") &&
+        line.includes("\\/api\\/timedtext")
+    );
+  assert.ok(responseRule);
+  assert.doesNotMatch(responseRule, /subtype=Official/);
+  assert.match(responseRule, /timedtext\(\\\?\.\+\)\?\$/);
 });
 
 test("local plugin pins DualSubs, exposes AI settings, and has no template markers", async () => {
@@ -90,5 +99,14 @@ test("local plugin pins DualSubs, exposes AI settings, and has no template marke
   assert.match(plugin, /timeout_ms = select,"5200","4000","6000"/);
   assert.match(plugin, /max_wait_ms = select,"6200","5000","5800","6500"/);
   assert.match(plugin, /subtype=Official/);
+  const timedTextResponseRule = plugin
+    .split("\n")
+    .find(
+      (line) =>
+        line.startsWith("http-response ") &&
+        line.includes("\\/api\\/timedtext")
+    );
+  assert.ok(timedTextResponseRule);
+  assert.doesNotMatch(timedTextResponseRule, /subtype=Official/);
   assert.match(plugin, /\[MITM\][\s\S]*youtubei\.googleapis\.com/);
 });

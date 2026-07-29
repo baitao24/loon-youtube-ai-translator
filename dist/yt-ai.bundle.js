@@ -1,4 +1,4 @@
-// DualSubs AI bilingual subtitles for Loon v0.3.0
+// DualSubs AI bilingual subtitles for Loon v0.3.1
 // DualSubs YouTube v1.5.11 compatibility layer + Gemini/OpenAI-Compatible enhancement
 // Official YouTube translation remains the safe fallback.
 // Never logs API keys or full subtitle payloads.
@@ -9,7 +9,7 @@
 })(typeof globalThis === "object" ? globalThis : this, function createYouTubeAICore() {
   "use strict";
 
-  const VERSION = "0.3.0";
+  const VERSION = "0.3.1";
   const QUERY_FLAG = "dsai";
   const QUERY_TARGET = "tlang";
   const CACHE_VERSION = "v3";

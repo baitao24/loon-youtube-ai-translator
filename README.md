@@ -34,7 +34,7 @@
 
 旧版直接拦截原字幕并等待 AI。AI 未在 YouTube 的短等待窗口内完成时，只能返回原文，甚至可能让客户端显示字幕加载失败。
 
-`0.3.0` 改为 DualSubs Official 基线：
+`0.3.1` 改为 DualSubs Official 基线：
 
 - 不删除 `tlang`
 - 不强制把 srv3 改成 JSON3

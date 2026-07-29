@@ -6,7 +6,7 @@
 #!system = iOS,iPadOS,macOS
 #!system_version = 15
 #!loon_version = 3.4.0(962)
-#!version = 0.3.0
+#!version = 0.3.1
 
 [Argument]
 Type = select,"Official",tag=DualSubs 字幕模式,desc=AI 增强必须使用 Official；先取得 YouTube 官方译文作为安全兜底
@@ -47,7 +47,10 @@ http-response ^https?:\/\/youtubei\.googleapis\.com\/youtubei\/v1\/get_watch(\?.
 
 # 本项目只接管 timedtext：保留官方译文作为底座，再尝试 AI 增强
 http-request ^https?:\/\/(www|m)\.youtube\.com\/api\/timedtext(\?.+)?$ script-path=dualsubs-ai.bundle.js, timeout=8, tag=DualSubs AI 字幕请求, argument=[{ai_enabled},{provider},{api_key},{model},{base_url},{gemini_base_url},{target_language},{auto_translate},{ShowOnly},{Position},{custom_prompt},{thinking_level},{max_batch_items},{max_batch_chars},{concurrency},{retries},{timeout_ms},{max_wait_ms},{cache_entries},{LogLevel}]
-http-response ^https?:\/\/(www|m)\.youtube\.com\/api\/timedtext\?(.*)subtype=Official requires-body=1, max-size=0, script-path=dualsubs-ai.bundle.js, timeout=8, tag=DualSubs AI 字幕响应, argument=[{ai_enabled},{provider},{api_key},{model},{base_url},{gemini_base_url},{target_language},{auto_translate},{ShowOnly},{Position},{custom_prompt},{thinking_level},{max_batch_items},{max_batch_chars},{concurrency},{retries},{timeout_ms},{max_wait_ms},{cache_entries},{LogLevel}]
+# Loon uses the pre-request-script URL for response-rule matching, so this rule
+# must match the original timedtext URL. The runtime itself verifies the
+# prepared subtype=Official request before changing the response.
+http-response ^https?:\/\/(www|m)\.youtube\.com\/api\/timedtext(\?.+)?$ requires-body=1, max-size=0, script-path=dualsubs-ai.bundle.js, timeout=8, tag=DualSubs AI 字幕响应, argument=[{ai_enabled},{provider},{api_key},{model},{base_url},{gemini_base_url},{target_language},{auto_translate},{ShowOnly},{Position},{custom_prompt},{thinking_level},{max_batch_items},{max_batch_chars},{concurrency},{retries},{timeout_ms},{max_wait_ms},{cache_entries},{LogLevel}]
 
 [MITM]
 hostname = www.youtube.com, m.youtube.com, tv.youtube.com, youtubei.googleapis.com, -redirector*.googlevideo.com, *.googlevideo.com

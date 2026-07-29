@@ -38,7 +38,7 @@ test("normalizes DualSubs AI settings and keeps secrets opaque", () => {
     ai_enabled: "true",
     concurrency: "9"
   });
-  assert.equal(Core.VERSION, "0.3.0");
+  assert.equal(Core.VERSION, "0.3.1");
   assert.equal(config.provider, "OpenAI-Compatible");
   assert.equal(config.apiKey, "secret-value");
   assert.equal(config.model, "deepseek-chat");

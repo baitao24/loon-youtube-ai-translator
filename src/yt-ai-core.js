@@ -5,7 +5,7 @@
 })(typeof globalThis === "object" ? globalThis : this, function createYouTubeAICore() {
   "use strict";
 
-  const VERSION = "0.3.0";
+  const VERSION = "0.3.1";
   const QUERY_FLAG = "dsai";
   const QUERY_TARGET = "tlang";
   const CACHE_VERSION = "v3";
