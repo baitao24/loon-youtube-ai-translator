@@ -5,13 +5,14 @@
 })(typeof globalThis === "object" ? globalThis : this, function createYouTubeAICore() {
   "use strict";
 
-  const VERSION = "0.2.4";
-  const QUERY_FLAG = "ytai";
-  const QUERY_TARGET = "ytai_tlang";
-  const CACHE_VERSION = "v2";
+  const VERSION = "0.3.0";
+  const QUERY_FLAG = "dsai";
+  const QUERY_TARGET = "tlang";
+  const CACHE_VERSION = "v3";
 
   const DEFAULTS = Object.freeze({
     provider: "Gemini",
+    aiEnabled: true,
     apiKey: "",
     model: "gemini-3.6-flash",
     baseUrl: "https://api.openai.com/v1",
@@ -21,12 +22,14 @@
     showOnly: false,
     position: "TranslationFirst",
     customPrompt: "",
-    maxBatchItems: 120,
-    maxBatchChars: 12000,
-    concurrency: 3,
+    maxBatchItems: 250,
+    maxBatchChars: 30000,
+    concurrency: 4,
     retries: 0,
-    timeoutMs: 5000,
-    maxWaitMs: 6500,
+    timeoutMs: 5200,
+    maxWaitMs: 6200,
+    originalFetchTimeoutMs: 1400,
+    alignmentToleranceMs: 160,
     thinkingLevel: "minimal",
     cacheEntries: 6,
     cacheMaxChars: 180000,
@@ -81,8 +84,18 @@
     const position = positionRaw.includes("source") || positionRaw === "forward"
       ? "SourceFirst"
       : "TranslationFirst";
+    const configuredTimeoutMs = clampInteger(
+      raw.timeout_ms ?? raw.timeoutMs,
+      DEFAULTS.timeoutMs,
+      3000,
+      60000
+    );
     return {
       provider,
+      aiEnabled: toBoolean(
+        raw.ai_enabled ?? raw.aiEnabled ?? raw.AIEnabled,
+        DEFAULTS.aiEnabled
+      ),
       apiKey: String(raw.api_key || raw.apiKey || raw.APIKey || DEFAULTS.apiKey).trim(),
       model: String(raw.model || raw.Model || DEFAULTS.model).trim(),
       baseUrl: String(raw.base_url || raw.baseUrl || raw.BaseURL || DEFAULTS.baseUrl).trim(),
@@ -96,29 +109,50 @@
         raw.auto_translate ?? raw.autoTranslate ?? raw.AutoTranslate,
         DEFAULTS.autoTranslate
       ),
-      showOnly: toBoolean(raw.show_only ?? raw.showOnly ?? raw.ShowOnly, DEFAULTS.showOnly),
+      showOnly: toBoolean(
+        raw.show_only ?? raw.showOnly ?? raw.ShowOnly,
+        DEFAULTS.showOnly
+      ),
       position,
       customPrompt: String(raw.custom_prompt || raw.customPrompt || DEFAULTS.customPrompt).trim(),
       maxBatchItems: clampInteger(
         raw.max_batch_items ?? raw.maxBatchItems,
         DEFAULTS.maxBatchItems,
         5,
-        150
+        400
       ),
       maxBatchChars: clampInteger(
         raw.max_batch_chars ?? raw.maxBatchChars,
         DEFAULTS.maxBatchChars,
         500,
-        20000
+        50000
       ),
       concurrency: clampInteger(raw.concurrency, DEFAULTS.concurrency, 1, 4),
       retries: clampInteger(raw.retries, DEFAULTS.retries, 0, 4),
-      timeoutMs: clampInteger(raw.timeout_ms ?? raw.timeoutMs, DEFAULTS.timeoutMs, 3000, 60000),
+      // 5000 ms was the Gemini default through 0.2.4. On a real iPhone it
+      // cancelled a single otherwise valid response at ~5.5 s, so migrate that
+      // old default while keeping explicitly shorter/longer values untouched.
+      timeoutMs:
+        provider === "Gemini" && configuredTimeoutMs === 5000
+          ? DEFAULTS.timeoutMs
+          : configuredTimeoutMs,
       maxWaitMs: clampInteger(
         raw.max_wait_ms ?? raw.maxWaitMs,
         DEFAULTS.maxWaitMs,
         3000,
-        45000
+        7000
+      ),
+      originalFetchTimeoutMs: clampInteger(
+        raw.original_fetch_timeout_ms ?? raw.originalFetchTimeoutMs,
+        DEFAULTS.originalFetchTimeoutMs,
+        500,
+        2500
+      ),
+      alignmentToleranceMs: clampInteger(
+        raw.alignment_tolerance_ms ?? raw.alignmentToleranceMs,
+        DEFAULTS.alignmentToleranceMs,
+        0,
+        1000
       ),
       thinkingLevel: ["minimal", "low", "medium", "high"].includes(
         String(raw.thinking_level || raw.thinkingLevel || DEFAULTS.thinkingLevel).toLowerCase()
@@ -139,7 +173,9 @@
         10000,
         1000000
       ),
-      logLevel: String(raw.log_level || raw.logLevel || DEFAULTS.logLevel).toUpperCase()
+      logLevel: String(
+        raw.log_level || raw.logLevel || raw.LogLevel || DEFAULTS.logLevel
+      ).toUpperCase()
     };
   }
 
@@ -204,6 +240,72 @@
     return result;
   }
 
+  function prepareDualSubsRequest(inputUrl, config) {
+    const result = {
+      changed: false,
+      reason: "not-timedtext",
+      url: inputUrl,
+      sourceLanguage: "",
+      targetLanguage: ""
+    };
+    let url;
+    try {
+      url = new URL(inputUrl);
+    } catch (_) {
+      result.reason = "invalid-url";
+      return result;
+    }
+    if (url.pathname !== "/api/timedtext") return result;
+
+    const sourceLanguage = url.searchParams.get("lang") || "auto";
+    const explicitTarget = url.searchParams.get("tlang");
+    const targetLanguage = explicitTarget || config.targetLanguage;
+    result.sourceLanguage = sourceLanguage;
+    result.targetLanguage = targetLanguage;
+
+    if (!explicitTarget && !config.autoTranslate) {
+      result.reason = "manual-only";
+      return result;
+    }
+    if (!targetLanguage) {
+      result.reason = "missing-target";
+      return result;
+    }
+    if (!explicitTarget && languageRoot(sourceLanguage) === languageRoot(targetLanguage)) {
+      result.reason = "same-language";
+      return result;
+    }
+
+    url.searchParams.set("tlang", targetLanguage);
+    url.searchParams.set("subtype", "Official");
+    url.searchParams.set(QUERY_FLAG, "1");
+    result.changed = url.toString() !== inputUrl;
+    result.reason = result.changed ? "official-baseline" : "already-prepared";
+    result.url = url.toString();
+    return result;
+  }
+
+  function isDualSubsResponse(inputUrl) {
+    try {
+      const url = new URL(inputUrl);
+      return (
+        url.pathname === "/api/timedtext" &&
+        url.searchParams.get("subtype") === "Official" &&
+        Boolean(url.searchParams.get("tlang"))
+      );
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function originalSubtitleUrl(inputUrl) {
+    const url = new URL(inputUrl);
+    url.searchParams.delete("tlang");
+    url.searchParams.delete("subtype");
+    url.searchParams.delete(QUERY_FLAG);
+    return url.toString();
+  }
+
   function shouldProcessResponse(inputUrl) {
     try {
       const url = new URL(inputUrl);
@@ -235,7 +337,13 @@
       if (!event || !Array.isArray(event.segs)) return;
       const text = cleanCueText(event.segs.map((segment) => segment?.utf8 || "").join(""));
       if (!text) return;
-      cues.push({ id: eventIndex, eventIndex, text });
+      cues.push({
+        id: eventIndex,
+        eventIndex,
+        startMs: Number(event.tStartMs || 0),
+        durationMs: Number(event.dDurationMs || 0),
+        text
+      });
     });
     return cues;
   }
@@ -287,9 +395,15 @@
         )
       );
       if (text) {
+        const startMatch = match[1].match(/\bt=(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i);
+        const durationMatch = match[1].match(/\bd=(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i);
         cues.push({
           id: cues.length,
           paragraphIndex,
+          startMs: Number(startMatch?.[1] ?? startMatch?.[2] ?? startMatch?.[3] ?? 0),
+          durationMs: Number(
+            durationMatch?.[1] ?? durationMatch?.[2] ?? durationMatch?.[3] ?? 0
+          ),
           text
         });
       }
@@ -554,6 +668,131 @@
     );
   }
 
+  function detectSubtitleFormat(body, contentType) {
+    const normalizedType = String(contentType || "").toLowerCase();
+    const text = String(body || "").trim();
+    if (
+      normalizedType.includes("json") ||
+      text.startsWith("{") ||
+      text.startsWith("[")
+    ) {
+      return "json3";
+    }
+    if (
+      normalizedType.includes("xml") ||
+      /^<\?xml\b/i.test(text) ||
+      /^<timedtext\b/i.test(text)
+    ) {
+      return "srv3";
+    }
+    return "unknown";
+  }
+
+  function parseSubtitleDocument(body, contentType) {
+    const format = detectSubtitleFormat(body, contentType);
+    if (format === "json3") {
+      const value = typeof body === "string" ? JSON.parse(body || "{}") : body;
+      return { format, value, cues: extractCues(value) };
+    }
+    if (format === "srv3") {
+      const value = String(body || "");
+      return { format, value, cues: extractSrv3Cues(value) };
+    }
+    throw new Error("Unsupported YouTube subtitle format");
+  }
+
+  function renderSubtitleDocument(document, translations, config) {
+    if (document.format === "json3") {
+      const value = JSON.parse(JSON.stringify(document.value));
+      return JSON.stringify(
+        mergeTranslations(value, document.cues, translations, config)
+      );
+    }
+    if (document.format === "srv3") {
+      return mergeSrv3Translations(
+        document.value,
+        document.cues,
+        translations,
+        config
+      );
+    }
+    throw new Error(`Unsupported subtitle format: ${document.format}`);
+  }
+
+  function alignCueTexts(sourceCues, translatedCues, toleranceMs) {
+    const tolerance = Math.max(0, Number(toleranceMs || 0));
+    const aligned = [];
+    let sourceIndex = 0;
+    let translatedIndex = 0;
+    const hasUsefulTimestamps =
+      sourceCues.some((cue) => cue.startMs > 0) ||
+      translatedCues.some((cue) => cue.startMs > 0);
+
+    if (!hasUsefulTimestamps) {
+      const length = Math.min(sourceCues.length, translatedCues.length);
+      for (let index = 0; index < length; index += 1) {
+        aligned.push({
+          id: sourceCues[index].id,
+          text: translatedCues[index].text
+        });
+      }
+      return aligned;
+    }
+
+    while (
+      sourceIndex < sourceCues.length &&
+      translatedIndex < translatedCues.length
+    ) {
+      const sourceCue = sourceCues[sourceIndex];
+      const translatedCue = translatedCues[translatedIndex];
+      const difference = translatedCue.startMs - sourceCue.startMs;
+      if (Math.abs(difference) <= tolerance) {
+        aligned.push({ id: sourceCue.id, text: translatedCue.text });
+        sourceIndex += 1;
+        translatedIndex += 1;
+      } else if (difference < 0) {
+        translatedIndex += 1;
+      } else {
+        sourceIndex += 1;
+      }
+    }
+    return aligned;
+  }
+
+  function composeOfficialSubtitles(
+    sourceBody,
+    sourceContentType,
+    translatedBody,
+    translatedContentType,
+    config
+  ) {
+    const source = parseSubtitleDocument(sourceBody, sourceContentType);
+    const translated = parseSubtitleDocument(
+      translatedBody,
+      translatedContentType
+    );
+    const translations = alignCueTexts(
+      source.cues,
+      translated.cues,
+      config.alignmentToleranceMs
+    );
+    if (!translations.length) {
+      throw new Error("Official subtitle alignment produced no matches");
+    }
+    return {
+      body: renderSubtitleDocument(source, translations, config),
+      format: source.format,
+      contentType:
+        source.format === "srv3"
+          ? "application/xml; charset=utf-8"
+          : "application/json; charset=utf-8",
+      sourceCues: source.cues,
+      translatedCues: translated.cues,
+      matchedCues: translations.length,
+      matchRate: translations.length / Math.max(1, source.cues.length)
+    };
+  }
+
   function fnv1a(value) {
     let hash = 0x811c9dc5;
     const text = String(value);
@@ -579,6 +818,26 @@
     return `${CACHE_VERSION}:${fnv1a(JSON.stringify(identity))}`;
   }
 
+  function makeResponseCacheKey(inputUrl, responseBody, config) {
+    const url = new URL(inputUrl);
+    const identity = {
+      version: CACHE_VERSION,
+      video: url.searchParams.get("v") || "",
+      source: url.searchParams.get("lang") || "",
+      target: url.searchParams.get("tlang") || config.targetLanguage,
+      kind: url.searchParams.get("kind") || "",
+      format: url.searchParams.get("fmt") || url.searchParams.get("format") || "",
+      provider: config.provider,
+      model: config.model,
+      prompt: config.customPrompt,
+      aiEnabled: config.aiEnabled,
+      showOnly: config.showOnly,
+      position: config.position,
+      officialBody: fnv1a(String(responseBody || ""))
+    };
+    return `${CACHE_VERSION}:response:${fnv1a(JSON.stringify(identity))}`;
+  }
+
   return {
     VERSION,
     QUERY_FLAG,
@@ -588,6 +847,9 @@
     normalizeConfig,
     isConfigured,
     rewriteTimedTextRequest,
+    prepareDualSubsRequest,
+    isDualSubsResponse,
+    originalSubtitleUrl,
     shouldProcessResponse,
     responseLanguages,
     extractCues,
@@ -604,7 +866,13 @@
     combineText,
     mergeTranslations,
     mergeSrv3Translations,
+    detectSubtitleFormat,
+    parseSubtitleDocument,
+    renderSubtitleDocument,
+    alignCueTexts,
+    composeOfficialSubtitles,
     fnv1a,
-    makeCacheKey
+    makeCacheKey,
+    makeResponseCacheKey
   };
 });

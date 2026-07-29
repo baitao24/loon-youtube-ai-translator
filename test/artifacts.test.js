@@ -7,41 +7,88 @@ const test = require("node:test");
 const projectRoot = path.resolve(__dirname, "..");
 
 test("generated bundle hash matches manifest and contains both runtimes", async () => {
-  const [bundle, manifestText] = await Promise.all([
+  const [bundle, legacyBundle, manifestText] = await Promise.all([
+    readFile(path.join(projectRoot, "dist/dualsubs-ai.bundle.js"), "utf8"),
     readFile(path.join(projectRoot, "dist/yt-ai.bundle.js"), "utf8"),
     readFile(path.join(projectRoot, "dist/manifest.json"), "utf8")
   ]);
   const manifest = JSON.parse(manifestText);
   const digest = createHash("sha256").update(bundle).digest("hex");
   assert.equal(digest, manifest.sha256);
+  assert.equal(manifest.upstream.youtube, "v1.5.11");
+  assert.equal(manifest.upstream.universalReference, "v1.7.5");
+  assert.equal(legacyBundle, bundle);
+  assert.equal(manifest.compatibility.bundle, "yt-ai.bundle.js");
   assert.match(bundle, /function createYouTubeAICore/);
-  assert.match(bundle, /function runYouTubeAITranslator/);
+  assert.match(bundle, /function runDualSubsAITranslator/);
   assert.doesNotMatch(bundle, /test-secret|openai-secret|gemini-secret/);
 });
 
-test("local Loon plugin has complete arguments, safe defaults, and no template markers", async () => {
+test("existing public subscription filenames remain valid and use the new runtime", async () => {
+  const [remotePlugin, legacyRemotePlugin, localPlugin, legacyLocalPlugin] =
+    await Promise.all([
+      readFile(
+        path.join(projectRoot, "dist/DualSubs.AI.YouTube.remote.plugin"),
+        "utf8"
+      ),
+      readFile(
+        path.join(projectRoot, "dist/YouTube.AI.Translate.remote.plugin"),
+        "utf8"
+      ),
+      readFile(
+        path.join(projectRoot, "dist/DualSubs.AI.YouTube.local.plugin"),
+        "utf8"
+      ),
+      readFile(
+        path.join(projectRoot, "dist/YouTube.AI.Translate.local.plugin"),
+        "utf8"
+      )
+    ]);
+
+  assert.equal(legacyRemotePlugin, remotePlugin);
+  assert.equal(legacyLocalPlugin, localPlugin);
+  assert.match(remotePlugin, /^#!version = 0\.3\.0$/m);
+  assert.match(
+    remotePlugin,
+    /script-path=https:\/\/raw\.githubusercontent\.com\/baitao24\/loon-youtube-ai-translator\/main\/dist\/dualsubs-ai\.bundle\.js/
+  );
+  assert.match(remotePlugin, /subtype=Official/);
+});
+
+test("local plugin pins DualSubs, exposes AI settings, and has no template markers", async () => {
   const plugin = await readFile(
-    path.join(projectRoot, "dist/YouTube.AI.Translate.local.plugin"),
+    path.join(projectRoot, "dist/DualSubs.AI.YouTube.local.plugin"),
     "utf8"
   );
-  const definitionNames = [...plugin.matchAll(/^([a-z_]+)\s*=\s*(?:input|select|switch),/gm)]
-    .map((match) => match[1]);
-  const argumentLine = plugin
+  const definitions = new Set(
+    [...plugin.matchAll(/^([A-Za-z_]+)\s*=\s*(?:input|select|switch),/gm)].map(
+      (match) => match[1]
+    )
+  );
+  const scriptLines = plugin
     .split("\n")
-    .find((line) => line.includes("tag=YouTube AI 字幕请求"));
-  const referencedNames = [...argumentLine.matchAll(/\{([a-z_]+)\}/g)].map((match) => match[1]);
+    .filter((line) => line.startsWith("http-"));
+  for (const line of scriptLines) {
+    for (const match of line.matchAll(/\{([A-Za-z_]+)\}/g)) {
+      assert.equal(definitions.has(match[1]), true, `missing argument ${match[1]}`);
+    }
+  }
 
-  assert.deepEqual(referencedNames, definitionNames);
   assert.doesNotMatch(plugin, /\{\{SCRIPT_URL\}\}/);
-  assert.match(plugin, /script-path=yt-ai\.bundle\.js/);
+  assert.match(plugin, /script-path=dualsubs-ai\.bundle\.js/);
+  assert.match(
+    plugin,
+    /DualSubs\/YouTube\/releases\/download\/v1\.5\.11\/request\.bundle\.js/
+  );
+  assert.match(plugin, /Type = select,"Official"/);
+  assert.match(plugin, /ai_enabled = switch,true/);
   assert.match(plugin, /provider = select,"Gemini","OpenAI-Compatible"/);
   assert.match(plugin, /model = input,"gemini-3\.6-flash"/);
-  assert.match(plugin, /thinking_level = select,"minimal","low","medium","high"/);
-  assert.match(plugin, /concurrency = select,"3","1","2","4"/);
-  assert.match(plugin, /retries = select,"0","1","2","3"/);
-  assert.match(plugin, /timeout_ms = select,"5000","4000","6000","8000"/);
-  assert.match(plugin, /max_wait_ms = select,"6500","5000","6000","7500"/);
-  assert.match(plugin, /cache_entries = select,"6","0","3","10","20"/);
-  assert.match(plugin, /timeout=8/);
-  assert.match(plugin, /\[MITM\][\s\S]*www\.youtube\.com, m\.youtube\.com/);
+  assert.match(plugin, /Position = select,"Reverse","Forward"/);
+  assert.match(plugin, /max_batch_items = select,"250","120","180","300"/);
+  assert.match(plugin, /concurrency = select,"4","1","2","3"/);
+  assert.match(plugin, /timeout_ms = select,"5200","4000","6000"/);
+  assert.match(plugin, /max_wait_ms = select,"6200","5000","5800","6500"/);
+  assert.match(plugin, /subtype=Official/);
+  assert.match(plugin, /\[MITM\][\s\S]*youtubei\.googleapis\.com/);
 });

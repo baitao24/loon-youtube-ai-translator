@@ -1,37 +1,53 @@
-#!name = YouTube AI 双语字幕
-#!desc = 使用自选 OpenAI-Compatible 或 Gemini 模型翻译 YouTube 现有字幕，并显示原文与译文。API Key 仅保存在 Loon 本机并直连所选服务商。
-#!author = Codex & aot
+#!name = DualSubs AI 双语字幕
+#!desc = 基于 DualSubs 的 YouTube 双语字幕增强：优先使用 Gemini 或 OpenAI-Compatible，AI 超时或失败时保留官方 Google 双语字幕。
+#!author = aot & Codex；基于 DualSubs（Apache-2.0）
 #!homepage = https://github.com/baitao24/loon-youtube-ai-translator
-#!tag = YouTube,字幕,AI
+#!tag = YouTube,字幕,DualSubs,AI
 #!system = iOS,iPadOS,macOS
 #!system_version = 15
 #!loon_version = 3.4.0(962)
-#!version = 0.2.5
+#!version = 0.3.0
 
 [Argument]
+Type = select,"Official",tag=DualSubs 字幕模式,desc=AI 增强必须使用 Official；先取得 YouTube 官方译文作为安全兜底
+Types = input,"Translate",tag=DualSubs 歌词模式,desc=保留上游兼容参数；YouTube 视频字幕无需修改
+AutoCC = switch,true,tag=自动显示字幕,desc=由 DualSubs 播放器脚本自动开启字幕
+Position = select,"Reverse","Forward",tag=字幕顺序,desc=Reverse 为译文在上，Forward 为原文在上
+Vendor = select,"Google",tag=官方兜底翻译器,desc=固定使用 YouTube/Google 官方译文作为 AI 失败时的安全底座
+ShowOnly = switch,false,tag=仅显示译文,desc=开启后不显示原文；AI 与官方兜底共同遵循此设置
+ai_enabled = switch,true,tag=启用 AI 增强,desc=关闭后仍使用稳定的 DualSubs 官方双语字幕
 provider = select,"Gemini","OpenAI-Compatible",tag=AI 服务商,desc=Gemini 使用 Google 原生 generateContent；其他兼容服务选择 OpenAI-Compatible
 api_key = input,"",tag=API Key,desc=只保存在 Loon 本机；请使用限额和受限密钥
-model = input,"gemini-3.6-flash",tag=模型名称,desc=例如 Gemini 模型或服务商提供的 OpenAI 兼容模型 ID
-base_url = input,"https://api.openai.com/v1",tag=OpenAI Base URL,desc=仅 OpenAI-Compatible 使用；可填写到 /v1 或完整 /chat/completions 地址
+model = input,"gemini-3.6-flash",tag=模型名称,desc=低延迟可选 gemini-3.5-flash-lite；兼容服务填写其模型 ID
+base_url = input,"https://api.openai.com/v1",tag=OpenAI Base URL,desc=仅 OpenAI-Compatible 使用；可填写到 /v1 或完整 /chat/completions
 gemini_base_url = input,"https://generativelanguage.googleapis.com/v1beta",tag=Gemini Base URL,desc=一般无需修改
-target_language = input,"zh-Hans",tag=默认目标语言,desc=建议使用 BCP 47，例如 zh-Hans、zh-Hant、en、ja；YouTube 菜单所选 tlang 优先
-auto_translate = switch,true,tag=自动翻译所有字幕,desc=开启后普通字幕请求也会转成 AI 双语；关闭后仅处理 YouTube 自动翻译请求
-show_only = switch,false,tag=只显示译文,desc=关闭时显示双语字幕
-position = select,"TranslationFirst","SourceFirst",tag=字幕顺序,desc=TranslationFirst 为译文在上，SourceFirst 为原文在上
+target_language = input,"zh-Hans",tag=默认目标语言,desc=YouTube 菜单所选语言优先；普通字幕默认翻译为此语言
+auto_translate = switch,true,tag=普通字幕自动转双语,desc=关闭后只处理 YouTube 自动翻译菜单发出的请求
 custom_prompt = input,"",tag=额外翻译要求,desc=可填写术语、称呼、风格；不要填写密钥
-thinking_level = select,"minimal","low","medium","high",tag=Gemini 思考等级,desc=字幕翻译建议 minimal；仅 Gemini 3.x 使用
-max_batch_items = select,"120","60","80","150",tag=每批字幕条数,desc=默认 120；减少批次数以缩短首次显示等待
-max_batch_chars = select,"12000","5000","8000","16000",tag=每批字符数,desc=默认 12000
-concurrency = select,"3","1","2","4",tag=并发请求数,desc=默认 3；遇到限流时改为 1
-retries = select,"0","1","2","3",tag=失败重试次数,desc=默认 0；字幕显示链路优先快速回退
-timeout_ms = select,"6000","4000","5000","8000",tag=单次 API 超时,desc=Gemini 默认 6000 毫秒；整次处理仍受字幕最大等待限制
-max_wait_ms = select,"6500","5000","6000","7500",tag=字幕最大等待,desc=默认 6500 毫秒；脚本始终在客户端约 8 秒超时前结束
-cache_entries = select,"6","0","3","10","20",tag=本地缓存视频数,desc=默认 6；0 表示关闭缓存
-log_level = select,"INFO","ERROR","WARN","DEBUG","OFF",tag=日志等级,desc=日志不会输出 API Key 或完整字幕
+thinking_level = select,"minimal","low","medium","high",tag=Gemini 思考等级,desc=字幕翻译建议 minimal，以降低首次显示延迟
+max_batch_items = select,"250","120","180","300",tag=每批字幕条数,desc=默认 250；尽量让长视频在一轮并发内完成
+max_batch_chars = select,"30000","12000","20000","40000",tag=每批字符数,desc=默认 30000
+concurrency = select,"4","1","2","3",tag=并发请求数,desc=默认 4；遇到限流时改为 1 或 2
+retries = select,"0","1","2",tag=失败重试次数,desc=默认 0；字幕关键路径优先快速回退
+timeout_ms = select,"5200","4000","6000",tag=单次 AI 超时,desc=整次处理仍受字幕最大等待限制
+max_wait_ms = select,"6200","5000","5800","6500",tag=字幕最大等待,desc=必须早于 YouTube 客户端约 8 秒的字幕超时
+cache_entries = select,"6","0","3","10",tag=本地缓存视频数,desc=缓存成功结果；AI 失败仅短暂缓存官方兜底
+LogLevel = select,"INFO","ERROR","WARN","DEBUG","OFF",tag=日志等级,desc=日志不输出 API Key 或完整字幕
+
+[Rewrite]
+^https?:\/\/([\w-]+)\.googlevideo\.com\/initplayback(\?.*oad=.+)$ reject-img
 
 [Script]
-http-request ^https?:\/\/(www|m)\.youtube\.com\/api\/timedtext(\?.+)?$ script-path={{SCRIPT_URL}}, timeout=10, tag=YouTube AI 字幕请求, argument=[{provider},{api_key},{model},{base_url},{gemini_base_url},{target_language},{auto_translate},{show_only},{position},{custom_prompt},{thinking_level},{max_batch_items},{max_batch_chars},{concurrency},{retries},{timeout_ms},{max_wait_ms},{cache_entries},{log_level}]
-http-response ^https?:\/\/(www|m)\.youtube\.com\/api\/timedtext(\?.+)?$ requires-body=true, max-size=0, script-path={{SCRIPT_URL}}, timeout=8, tag=YouTube AI 字幕响应, argument=[{provider},{api_key},{model},{base_url},{gemini_base_url},{target_language},{auto_translate},{show_only},{position},{custom_prompt},{thinking_level},{max_batch_items},{max_batch_chars},{concurrency},{retries},{timeout_ms},{max_wait_ms},{cache_entries},{log_level}]
+# DualSubs YouTube v1.5.11：只复用稳定的播放器/Protobuf 适配层
+http-request ^https?:\/\/(www|m|tv)\.youtube\.com\/youtubei\/v1\/player(\?.+)?$ requires-body=1, script-path=https://github.com/DualSubs/YouTube/releases/download/v1.5.11/request.bundle.js, tag=DualSubs.Player.request.json, argument=[{Type},{Types},{AutoCC},{Position},{Vendor},{ShowOnly},{LogLevel}]
+http-response ^https?:\/\/(www|m|tv)\.youtube\.com\/youtubei\/v1\/player(\?.+)?$ requires-body=1, script-path=https://github.com/DualSubs/YouTube/releases/download/v1.5.11/response.bundle.js, tag=DualSubs.Player.response.json, argument=[{Type},{Types},{AutoCC},{Position},{Vendor},{ShowOnly},{LogLevel}]
+http-request ^https?:\/\/youtubei\.googleapis\.com\/youtubei\/v1\/player(\?.+)?$ requires-body=1, binary-body-mode=1, script-path=https://github.com/DualSubs/YouTube/releases/download/v1.5.11/request.bundle.js, tag=DualSubs.Player.request.proto, argument=[{Type},{Types},{AutoCC},{Position},{Vendor},{ShowOnly},{LogLevel}]
+http-response ^https?:\/\/youtubei\.googleapis\.com\/youtubei\/v1\/player(\?.+)?$ requires-body=1, binary-body-mode=1, script-path=https://github.com/DualSubs/YouTube/releases/download/v1.5.11/response.bundle.js, tag=DualSubs.Player.response.proto, argument=[{Type},{Types},{AutoCC},{Position},{Vendor},{ShowOnly},{LogLevel}]
+http-response ^https?:\/\/youtubei\.googleapis\.com\/youtubei\/v1\/get_watch(\?.+)?$ requires-body=1, binary-body-mode=1, script-path=https://github.com/DualSubs/YouTube/releases/download/v1.5.11/response.bundle.js, tag=DualSubs.GetWatch.response.proto, argument=[{Type},{Types},{AutoCC},{Position},{Vendor},{ShowOnly},{LogLevel}]
+
+# 本项目只接管 timedtext：保留官方译文作为底座，再尝试 AI 增强
+http-request ^https?:\/\/(www|m)\.youtube\.com\/api\/timedtext(\?.+)?$ script-path={{SCRIPT_URL}}, timeout=8, tag=DualSubs AI 字幕请求, argument=[{ai_enabled},{provider},{api_key},{model},{base_url},{gemini_base_url},{target_language},{auto_translate},{ShowOnly},{Position},{custom_prompt},{thinking_level},{max_batch_items},{max_batch_chars},{concurrency},{retries},{timeout_ms},{max_wait_ms},{cache_entries},{LogLevel}]
+http-response ^https?:\/\/(www|m)\.youtube\.com\/api\/timedtext\?(.*)subtype=Official requires-body=1, max-size=0, script-path={{SCRIPT_URL}}, timeout=8, tag=DualSubs AI 字幕响应, argument=[{ai_enabled},{provider},{api_key},{model},{base_url},{gemini_base_url},{target_language},{auto_translate},{ShowOnly},{Position},{custom_prompt},{thinking_level},{max_batch_items},{max_batch_chars},{concurrency},{retries},{timeout_ms},{max_wait_ms},{cache_entries},{LogLevel}]
 
 [MITM]
-hostname = www.youtube.com, m.youtube.com
+hostname = www.youtube.com, m.youtube.com, tv.youtube.com, youtubei.googleapis.com, -redirector*.googlevideo.com, *.googlevideo.com

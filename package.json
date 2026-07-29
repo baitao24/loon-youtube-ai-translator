@@ -1,8 +1,8 @@
 {
   "name": "loon-youtube-ai-translator",
-  "version": "0.2.5",
+  "version": "0.3.0",
   "private": true,
-  "description": "Loon YouTube AI bilingual subtitle plugin with OpenAI-compatible and Gemini providers",
+  "description": "DualSubs-based Loon YouTube bilingual subtitles with Gemini/OpenAI-compatible enhancement and official fallback",
   "license": "MIT",
   "type": "commonjs",
   "scripts": {

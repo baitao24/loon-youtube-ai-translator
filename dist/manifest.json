@@ -1,9 +1,18 @@
 {
   "name": "loon-youtube-ai-translator",
-  "version": "0.2.5",
-  "bundle": "yt-ai.bundle.js",
-  "sha256": "86cb437165b2c9c9a5b2e3f360df13af9cd810ffcf8916e18b4e2ae817cbeaec",
-  "localPlugin": "YouTube.AI.Translate.local.plugin",
-  "remotePlugin": "YouTube.AI.Translate.remote.plugin",
-  "scriptUrl": "https://raw.githubusercontent.com/baitao24/loon-youtube-ai-translator/main/dist/yt-ai.bundle.js"
+  "version": "0.3.0",
+  "bundle": "dualsubs-ai.bundle.js",
+  "sha256": "0aa30ff23866ab990f0664170d5ad4cec576774d276d190883006a699106a42e",
+  "upstream": {
+    "youtube": "v1.5.11",
+    "universalReference": "v1.7.5"
+  },
+  "localPlugin": "DualSubs.AI.YouTube.local.plugin",
+  "remotePlugin": "DualSubs.AI.YouTube.remote.plugin",
+  "scriptUrl": "https://raw.githubusercontent.com/baitao24/loon-youtube-ai-translator/main/dist/dualsubs-ai.bundle.js",
+  "compatibility": {
+    "bundle": "yt-ai.bundle.js",
+    "localPlugin": "YouTube.AI.Translate.local.plugin",
+    "remotePlugin": "YouTube.AI.Translate.remote.plugin"
+  }
 }
