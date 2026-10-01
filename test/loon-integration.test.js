@@ -55,7 +55,7 @@ async function runLoon(overrides) {
   await Promise.race([
     donePromise,
     new Promise((_, reject) =>
-      setTimeout(() => reject(new Error("$done timeout")), 2500)
+      setTimeout(() => reject(new Error("$done timeout")), overrides.doneTimeoutMs || 2500)
     )
   ]);
   return { doneValue, store };
@@ -408,4 +408,93 @@ test("second identical response uses final cache without network calls", async (
     "AI世界\nWorld"
   );
   assert.equal(second.doneValue.headers["x-dualsubs-ai-result"], "cache-ai");
+});
+
+function tenCueJson3(prefix) {
+  return JSON.stringify({
+    events: Array.from({ length: 10 }, (_, index) => index).map((index) => ({
+      tStartMs: index * 1000 + 10,
+      dDurationMs: 900,
+      segs: [{ utf8: `${prefix}${index}` }]
+    }))
+  });
+}
+
+function geminiRows(rows) {
+  return JSON.stringify({
+    candidates: [{ content: { parts: [{ text: JSON.stringify({ translations: rows }) }] } }]
+  });
+}
+
+function partialRun({ store, onPost, notification }) {
+  return runLoon({
+    argument: {
+      ...config(),
+      concurrency: "2",
+      max_batch_items: "5",
+      max_wait_ms: "3000",
+      timeout_ms: "3000"
+    },
+    request: { url: officialUrl("json3", "longvid"), method: "GET", headers: {} },
+    response: {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+      body: tenCueJson3("官方")
+    },
+    httpClient: {
+      get(_request, callback) {
+        callback(null, { status: 200, headers: { "Content-Type": "application/json" } }, tenCueJson3("Line "));
+      },
+      post: onPost
+    },
+    notification,
+    store,
+    doneTimeoutMs: 4500
+  });
+}
+
+test("deadline returns finished AI rows and fills the rest with official text, then resumes", async () => {
+  const store = new Map();
+  let notifications = 0;
+  const first = await partialRun({
+    store,
+    notification: { post: () => (notifications += 1) },
+    onPost(request, callback) {
+      const ids = JSON.parse(JSON.parse(request.body).contents[0].parts[0].text).subtitles.map((row) => row.id);
+      // 第一批正常返回，第二批一直不返回（模拟慢请求）
+      if (ids[0] === 0) callback(null, { status: 200 }, geminiRows(ids.map((id) => ({ id, text: `AI${id}` }))));
+    }
+  });
+  const firstEvents = JSON.parse(first.doneValue.body).events.map((event) => event.segs[0].utf8);
+  assert.deepEqual(firstEvents, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9].map((i) => (i < 5 ? `AI${i}\nLine ${i}` : `官方${i}\nLine ${i}`)));
+  assert.equal(first.doneValue.headers["x-dualsubs-ai-result"], "ai-partial");
+  assert.equal(notifications, 1);
+
+  const requested = [];
+  const second = await partialRun({
+    store,
+    onPost(request, callback) {
+      const ids = JSON.parse(JSON.parse(request.body).contents[0].parts[0].text).subtitles.map((row) => row.id);
+      requested.push(...ids);
+      callback(null, { status: 200 }, geminiRows(ids.map((id) => ({ id, text: `AI${id}` }))));
+    }
+  });
+  assert.deepEqual(requested, [5, 6, 7, 8, 9], "续翻时只请求剩下的行");
+  const secondEvents = JSON.parse(second.doneValue.body).events.map((event) => event.segs[0].utf8);
+  assert.deepEqual(secondEvents, Array.from({ length: 10 }, (_, i) => `AI${i}\nLine ${i}`));
+  assert.equal(second.doneValue.headers["x-dualsubs-ai-result"], "ai");
+});
+
+test("a batch that drops one line keeps the other AI rows instead of falling back entirely", async () => {
+  const store = new Map();
+  const result = await partialRun({
+    store,
+    onPost(request, callback) {
+      const ids = JSON.parse(JSON.parse(request.body).contents[0].parts[0].text).subtitles.map((row) => row.id);
+      callback(null, { status: 200 }, geminiRows(ids.filter((id) => id !== 3).map((id) => ({ id, text: `AI${id}` }))));
+    }
+  });
+  const events = JSON.parse(result.doneValue.body).events.map((event) => event.segs[0].utf8);
+  assert.deepEqual(events, Array.from({ length: 10 }, (_, i) => (i === 3 ? `官方3\nLine 3` : `AI${i}\nLine ${i}`)));
+  assert.equal(result.doneValue.headers["x-dualsubs-ai-result"], "ai-partial");
 });

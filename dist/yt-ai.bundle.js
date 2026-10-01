@@ -1,4 +1,4 @@
-// DualSubs AI bilingual subtitles for Loon v0.3.1
+// DualSubs AI bilingual subtitles for Loon v0.4.0
 // DualSubs YouTube v1.5.11 compatibility layer + Gemini/OpenAI-Compatible enhancement
 // Official YouTube translation remains the safe fallback.
 // Never logs API keys or full subtitle payloads.
@@ -9,10 +9,10 @@
 })(typeof globalThis === "object" ? globalThis : this, function createYouTubeAICore() {
   "use strict";
 
-  const VERSION = "0.3.1";
+  const VERSION = "0.4.0";
   const QUERY_FLAG = "dsai";
   const QUERY_TARGET = "tlang";
-  const CACHE_VERSION = "v3";
+  const CACHE_VERSION = "v4";
 
   const DEFAULTS = Object.freeze({
     provider: "Gemini",
@@ -26,9 +26,11 @@
     showOnly: false,
     position: "TranslationFirst",
     customPrompt: "",
-    maxBatchItems: 250,
-    maxBatchChars: 30000,
-    concurrency: 4,
+    // 2026-10 真机实测：Loon 同一时间约 8 个请求在途，第 9 个开始排队；
+    // gemini-3.5-flash-lite 30 条一批约 2.5～3 秒。小批 + 8 并发让开头最快出结果。
+    maxBatchItems: 30,
+    maxBatchChars: 6000,
+    concurrency: 8,
     retries: 0,
     timeoutMs: 5200,
     maxWaitMs: 6200,
@@ -120,18 +122,18 @@
       position,
       customPrompt: String(raw.custom_prompt || raw.customPrompt || DEFAULTS.customPrompt).trim(),
       maxBatchItems: clampInteger(
-        raw.max_batch_items ?? raw.maxBatchItems,
+        raw.batch_size ?? raw.max_batch_items ?? raw.maxBatchItems,
         DEFAULTS.maxBatchItems,
         5,
         400
       ),
       maxBatchChars: clampInteger(
-        raw.max_batch_chars ?? raw.maxBatchChars,
+        raw.batch_chars ?? raw.max_batch_chars ?? raw.maxBatchChars,
         DEFAULTS.maxBatchChars,
         500,
         50000
       ),
-      concurrency: clampInteger(raw.concurrency, DEFAULTS.concurrency, 1, 4),
+      concurrency: clampInteger(raw.parallel ?? raw.concurrency, DEFAULTS.concurrency, 1, 12),
       retries: clampInteger(raw.retries, DEFAULTS.retries, 0, 4),
       // 5000 ms was the Gemini default through 0.2.4. On a real iPhone it
       // cancelled a single otherwise valid response at ~5.5 s, so migrate that
@@ -632,6 +634,40 @@
     });
   }
 
+  // 和 validateTranslations 不同：一批里个别行缺失、重复或异常时只丢掉这些行，
+  // 其余行照常使用，缺的行由官方译文补上。真机上约 1/20 的批次会少返回一行。
+  function salvageTranslations(payload, batch) {
+    const rows = Array.isArray(payload)
+      ? payload
+      : payload?.translations || payload?.data || payload?.items;
+    if (!Array.isArray(rows)) throw new Error("Translation payload is not an array");
+    const byId = new Map();
+    const duplicated = new Set();
+    rows.forEach((row) => {
+      const id = String(row?.id);
+      if (byId.has(id)) duplicated.add(id);
+      byId.set(id, row);
+    });
+    const result = [];
+    batch.forEach((cue) => {
+      const id = String(cue.id);
+      if (duplicated.has(id)) return;
+      const text = cleanCueText(byId.get(id)?.text);
+      if (!text || text.length > Math.max(240, cue.text.length * 8)) return;
+      result.push({ id: cue.id, text });
+    });
+    if (!result.length) throw new Error("Translation batch has no usable rows");
+    return result;
+  }
+
+  // AI 译文优先，没有 AI 译文的行用官方译文。
+  function mergeTranslationRows(officialRows, aiRows) {
+    const merged = new Map();
+    (officialRows || []).forEach((row) => merged.set(String(row.id), row));
+    (aiRows || []).forEach((row) => merged.set(String(row.id), row));
+    return Array.from(merged.values());
+  }
+
   function combineText(source, translation, config) {
     if (config.showOnly) return translation;
     return config.position === "SourceFirst"
@@ -790,8 +826,10 @@
         source.format === "srv3"
           ? "application/xml; charset=utf-8"
           : "application/json; charset=utf-8",
+      sourceDocument: source,
       sourceCues: source.cues,
       translatedCues: translated.cues,
+      translations,
       matchedCues: translations.length,
       matchRate: translations.length / Math.max(1, source.cues.length)
     };
@@ -867,6 +905,8 @@
     parseOpenAIResponse,
     parseGeminiResponse,
     validateTranslations,
+    salvageTranslations,
+    mergeTranslationRows,
     combineText,
     mergeTranslations,
     mergeSrv3Translations,
@@ -887,6 +927,12 @@
   const Core = globalThis.YTAI;
   const CACHE_KEY = "@DualSubs-AI.Cache.v1";
   const NOTICE_KEY = "@DualSubs-AI.LastNotice.v1";
+  // 按视频保存已翻好的 AI 行；没翻完的视频下次请求字幕时只翻剩下的行。
+  const ROWS_KEY = "@DualSubs-AI.Rows.v1";
+  const ROWS_MAX_CHARS = 400000;
+  // 剩余时间不够一批正常耗时（真机 2～3 秒）就不再发新批次。
+  const MIN_LAUNCH_MS = 2000;
+  const RENDER_RESERVE_MS = 150;
   const LOG_LEVELS = { OFF: 99, ERROR: 40, WARN: 30, INFO: 20, DEBUG: 10 };
   const CLIENT_SAFE_MAX_WAIT_MS = 6200;
   const config = Core.normalizeConfig(
@@ -907,7 +953,7 @@
       .slice(0, 220);
   }
 
-  function notifyFallback(message) {
+  function notifyFallback(message, subtitle) {
     if (typeof $notification === "undefined" || typeof $notification.post !== "function") {
       return;
     }
@@ -923,7 +969,7 @@
       $persistentStore?.write(String(now), NOTICE_KEY);
       $notification.post(
         "DualSubs AI 字幕",
-        "AI 未及时完成，已保留官方双语字幕",
+        subtitle || "AI 未及时完成，已保留官方双语字幕",
         message
       );
     } catch (_) {
@@ -1075,7 +1121,7 @@
             true
           );
           const raw = await httpPost(request);
-          return Core.validateTranslations(Core.parseGeminiResponse(raw), batch);
+          return Core.salvageTranslations(Core.parseGeminiResponse(raw), batch);
         }
 
         try {
@@ -1086,7 +1132,7 @@
             true
           );
           const raw = await httpPost(request);
-          return Core.validateTranslations(Core.parseOpenAIResponse(raw), batch);
+          return Core.salvageTranslations(Core.parseOpenAIResponse(raw), batch);
         } catch (error) {
           if (![400, 404, 422].includes(error?.status)) throw error;
           log("DEBUG", "JSON mode rejected; retrying without response_format");
@@ -1097,7 +1143,7 @@
             false
           );
           const raw = await httpPost(request);
-          return Core.validateTranslations(Core.parseOpenAIResponse(raw), batch);
+          return Core.salvageTranslations(Core.parseOpenAIResponse(raw), batch);
         }
       } catch (error) {
         lastError = error;
@@ -1125,6 +1171,72 @@
       Array.from({ length: workerCount }, () => runWorker())
     );
     return results;
+  }
+
+  // 在截止时间前尽量多翻：按时间顺序派发批次，到点就带着已完成的行返回，
+  // 不等仍在途的请求。单批失败不影响其他批次。
+  async function translateWithinDeadline(batches, languages) {
+    const rows = [];
+    const failures = [];
+    let nextIndex = 0;
+    let finished = false;
+    async function runWorker() {
+      while (!finished && nextIndex < batches.length) {
+        if (remainingTime() < MIN_LAUNCH_MS) return;
+        const batch = batches[nextIndex];
+        nextIndex += 1;
+        try {
+          const translated = await translateBatch(batch, languages);
+          if (!finished) rows.push(...translated);
+        } catch (error) {
+          failures.push(error);
+        }
+      }
+    }
+    const workerCount = Math.min(config.concurrency, Math.max(1, batches.length));
+    const workers = Promise.all(Array.from({ length: workerCount }, () => runWorker()));
+    let timer;
+    await Promise.race([
+      workers,
+      new Promise((resolve) => {
+        timer = setTimeout(resolve, Math.max(0, remainingTime() - RENDER_RESERVE_MS));
+      })
+    ]);
+    clearTimeout(timer);
+    finished = true;
+    return { rows: rows.slice(), failures, launched: nextIndex };
+  }
+
+  function loadRowStore() {
+    if (config.cacheEntries <= 0 || typeof $persistentStore === "undefined") return [];
+    try {
+      const parsed = JSON.parse($persistentStore.read(ROWS_KEY) || "[]");
+      return Array.isArray(parsed) ? parsed : [];
+    } catch (_) {
+      return [];
+    }
+  }
+
+  function readRows(key) {
+    const entry = loadRowStore().find((item) => item?.key === key);
+    return new Map(Object.entries(entry?.rows || {}));
+  }
+
+  function writeRows(key, rows) {
+    if (config.cacheEntries <= 0 || typeof $persistentStore === "undefined") return;
+    try {
+      const entries = loadRowStore().filter((item) => item?.key !== key);
+      entries.unshift({ key, updatedAt: Date.now(), rows: Object.fromEntries(rows) });
+      while (entries.length > config.cacheEntries) entries.pop();
+      let payload = JSON.stringify(entries);
+      while (payload.length > ROWS_MAX_CHARS && entries.length > 1) {
+        entries.pop();
+        payload = JSON.stringify(entries);
+      }
+      if (payload.length <= ROWS_MAX_CHARS) $persistentStore.write(payload, ROWS_KEY);
+    } catch (error) {
+      log("WARN", `Row cache write skipped: ${safeError(error)}`);
+    }
   }
 
   function loadCache() {
@@ -1281,44 +1393,58 @@
     }
 
     try {
-      const sourceDocument = Core.parseSubtitleDocument(
-        original.body,
-        originalContentType
-      );
+      const sourceDocument = official.sourceDocument;
       const languages = Core.responseLanguages($request.url, config);
-      const batches = Core.chunkCues(
-        sourceDocument.cues,
-        config.maxBatchItems,
-        config.maxBatchChars
-      );
+      const rowsKey = Core.makeCacheKey($request.url, config, sourceDocument.cues, languages);
+      const known = readRows(rowsKey);
+      const pending = sourceDocument.cues.filter((cue) => !known.has(String(cue.id)));
+      const batches = Core.chunkCues(pending, config.maxBatchItems, config.maxBatchChars);
       log(
         "INFO",
-        `AI translating ${sourceDocument.cues.length} cues in ${batches.length} batch(es) via ${config.provider}`
+        `AI translating ${pending.length}/${sourceDocument.cues.length} cues in ${batches.length} batch(es) via ${config.provider}`
       );
-      const translatedBatches = await mapLimit(
-        batches,
-        config.concurrency,
-        (batch) => translateBatch(batch, languages)
-      );
-      const translations = Core.validateTranslations(
-        { translations: translatedBatches.flat() },
-        sourceDocument.cues
-      );
+      const outcome = batches.length
+        ? await translateWithinDeadline(batches, languages)
+        : { rows: [], failures: [], launched: 0 };
+      outcome.rows.forEach((row) => known.set(String(row.id), row.text));
+      if (outcome.rows.length) writeRows(rowsKey, known);
+
+      const aiRows = sourceDocument.cues
+        .filter((cue) => known.has(String(cue.id)))
+        .map((cue) => ({ id: cue.id, text: known.get(String(cue.id)) }));
+      if (!aiRows.length) {
+        throw outcome.failures[0] || new Error("AI produced no rows before the subtitle deadline");
+      }
+      const complete = aiRows.length === sourceDocument.cues.length;
       const aiBody = Core.renderSubtitleDocument(
         sourceDocument,
-        translations,
+        Core.mergeTranslationRows(official.translations, aiRows),
         config
       );
-      writeCache(
-        responseCacheKey,
-        {
-          body: aiBody,
-          contentType: official.contentType,
-          result: "ai"
-        },
-        86400000
+      const percent = Math.floor((aiRows.length / sourceDocument.cues.length) * 100);
+      log(
+        "INFO",
+        `AI rows ${aiRows.length}/${sourceDocument.cues.length} (${percent}%), ` +
+          `new ${outcome.rows.length}, failed batches ${outcome.failures.length}, ` +
+          `${Date.now() - (executionDeadline - Math.min(config.maxWaitMs, CLIENT_SAFE_MAX_WAIT_MS))}ms`
       );
-      doneBody(aiBody, official.contentType, "ai");
+      if (complete) {
+        writeCache(
+          responseCacheKey,
+          {
+            body: aiBody,
+            contentType: official.contentType,
+            result: "ai"
+          },
+          86400000
+        );
+      } else {
+        notifyFallback(
+          `已用 AI 翻译 ${percent}%，其余为官方译文。关闭再打开字幕会继续翻译剩下的部分。`,
+          "AI 字幕部分完成"
+        );
+      }
+      doneBody(aiBody, official.contentType, complete ? "ai" : "ai-partial");
     } catch (error) {
       const message = safeError(error);
       log("WARN", `${message}; using official bilingual subtitles`);

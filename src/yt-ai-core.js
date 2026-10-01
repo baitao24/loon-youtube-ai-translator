@@ -5,10 +5,10 @@
 })(typeof globalThis === "object" ? globalThis : this, function createYouTubeAICore() {
   "use strict";
 
-  const VERSION = "0.3.1";
+  const VERSION = "0.4.0";
   const QUERY_FLAG = "dsai";
   const QUERY_TARGET = "tlang";
-  const CACHE_VERSION = "v3";
+  const CACHE_VERSION = "v4";
 
   const DEFAULTS = Object.freeze({
     provider: "Gemini",
@@ -22,9 +22,11 @@
     showOnly: false,
     position: "TranslationFirst",
     customPrompt: "",
-    maxBatchItems: 250,
-    maxBatchChars: 30000,
-    concurrency: 4,
+    // 2026-10 真机实测：Loon 同一时间约 8 个请求在途，第 9 个开始排队；
+    // gemini-3.5-flash-lite 30 条一批约 2.5～3 秒。小批 + 8 并发让开头最快出结果。
+    maxBatchItems: 30,
+    maxBatchChars: 6000,
+    concurrency: 8,
     retries: 0,
     timeoutMs: 5200,
     maxWaitMs: 6200,
@@ -116,18 +118,18 @@
       position,
       customPrompt: String(raw.custom_prompt || raw.customPrompt || DEFAULTS.customPrompt).trim(),
       maxBatchItems: clampInteger(
-        raw.max_batch_items ?? raw.maxBatchItems,
+        raw.batch_size ?? raw.max_batch_items ?? raw.maxBatchItems,
         DEFAULTS.maxBatchItems,
         5,
         400
       ),
       maxBatchChars: clampInteger(
-        raw.max_batch_chars ?? raw.maxBatchChars,
+        raw.batch_chars ?? raw.max_batch_chars ?? raw.maxBatchChars,
         DEFAULTS.maxBatchChars,
         500,
         50000
       ),
-      concurrency: clampInteger(raw.concurrency, DEFAULTS.concurrency, 1, 4),
+      concurrency: clampInteger(raw.parallel ?? raw.concurrency, DEFAULTS.concurrency, 1, 12),
       retries: clampInteger(raw.retries, DEFAULTS.retries, 0, 4),
       // 5000 ms was the Gemini default through 0.2.4. On a real iPhone it
       // cancelled a single otherwise valid response at ~5.5 s, so migrate that
@@ -628,6 +630,40 @@
     });
   }
 
+  // 和 validateTranslations 不同：一批里个别行缺失、重复或异常时只丢掉这些行，
+  // 其余行照常使用，缺的行由官方译文补上。真机上约 1/20 的批次会少返回一行。
+  function salvageTranslations(payload, batch) {
+    const rows = Array.isArray(payload)
+      ? payload
+      : payload?.translations || payload?.data || payload?.items;
+    if (!Array.isArray(rows)) throw new Error("Translation payload is not an array");
+    const byId = new Map();
+    const duplicated = new Set();
+    rows.forEach((row) => {
+      const id = String(row?.id);
+      if (byId.has(id)) duplicated.add(id);
+      byId.set(id, row);
+    });
+    const result = [];
+    batch.forEach((cue) => {
+      const id = String(cue.id);
+      if (duplicated.has(id)) return;
+      const text = cleanCueText(byId.get(id)?.text);
+      if (!text || text.length > Math.max(240, cue.text.length * 8)) return;
+      result.push({ id: cue.id, text });
+    });
+    if (!result.length) throw new Error("Translation batch has no usable rows");
+    return result;
+  }
+
+  // AI 译文优先，没有 AI 译文的行用官方译文。
+  function mergeTranslationRows(officialRows, aiRows) {
+    const merged = new Map();
+    (officialRows || []).forEach((row) => merged.set(String(row.id), row));
+    (aiRows || []).forEach((row) => merged.set(String(row.id), row));
+    return Array.from(merged.values());
+  }
+
   function combineText(source, translation, config) {
     if (config.showOnly) return translation;
     return config.position === "SourceFirst"
@@ -786,8 +822,10 @@
         source.format === "srv3"
           ? "application/xml; charset=utf-8"
           : "application/json; charset=utf-8",
+      sourceDocument: source,
       sourceCues: source.cues,
       translatedCues: translated.cues,
+      translations,
       matchedCues: translations.length,
       matchRate: translations.length / Math.max(1, source.cues.length)
     };
@@ -863,6 +901,8 @@
     parseOpenAIResponse,
     parseGeminiResponse,
     validateTranslations,
+    salvageTranslations,
+    mergeTranslationRows,
     combineText,
     mergeTranslations,
     mergeSrv3Translations,

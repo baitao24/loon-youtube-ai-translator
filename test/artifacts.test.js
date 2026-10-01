@@ -47,11 +47,16 @@ test("existing public subscription filenames remain valid and use the new runtim
 
   assert.equal(legacyRemotePlugin, remotePlugin);
   assert.equal(legacyLocalPlugin, localPlugin);
-  assert.match(remotePlugin, /^#!version = 0\.3\.1$/m);
-  assert.match(
-    remotePlugin,
-    /script-path=https:\/\/raw\.githubusercontent\.com\/baitao24\/loon-youtube-ai-translator\/main\/dist\/dualsubs-ai\.bundle\.js/
+  assert.match(remotePlugin, /^#!version = 0\.4\.0$/m);
+  // 远程插件必须指向构建时记录的脚本地址（main 或测试分支）
+  const manifest = JSON.parse(
+    await readFile(path.join(projectRoot, "dist/manifest.json"), "utf8")
   );
+  assert.match(
+    manifest.scriptUrl,
+    /^https:\/\/raw\.githubusercontent\.com\/baitao24\/loon-youtube-ai-translator\/(main|v0\.4)\/dist\/dualsubs-ai\.bundle\.js$/
+  );
+  assert.ok(remotePlugin.includes(`script-path=${manifest.scriptUrl},`));
   const responseRule = remotePlugin
     .split("\n")
     .find(
@@ -92,10 +97,10 @@ test("local plugin pins DualSubs, exposes AI settings, and has no template marke
   assert.match(plugin, /Type = select,"Official"/);
   assert.match(plugin, /ai_enabled = switch,true/);
   assert.match(plugin, /provider = select,"Gemini","OpenAI-Compatible"/);
-  assert.match(plugin, /model = input,"gemini-3\.6-flash"/);
+  assert.match(plugin, /model = input,"gemini-3\.5-flash-lite"/);
   assert.match(plugin, /Position = select,"Reverse","Forward"/);
-  assert.match(plugin, /max_batch_items = select,"250","120","180","300"/);
-  assert.match(plugin, /concurrency = select,"4","1","2","3"/);
+  assert.match(plugin, /batch_size = select,"30","20","40","60"/);
+  assert.match(plugin, /parallel = select,"8","4","6","10"/);
   assert.match(plugin, /timeout_ms = select,"5200","4000","6000"/);
   assert.match(plugin, /max_wait_ms = select,"6200","5000","5800","6500"/);
   assert.match(plugin, /subtype=Official/);

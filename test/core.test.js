@@ -36,16 +36,16 @@ test("normalizes DualSubs AI settings and keeps secrets opaque", () => {
     auto_translate: "false",
     Position: "Forward",
     ai_enabled: "true",
-    concurrency: "9"
+    concurrency: "20"
   });
-  assert.equal(Core.VERSION, "0.3.1");
+  assert.equal(Core.VERSION, "0.4.0");
   assert.equal(config.provider, "OpenAI-Compatible");
   assert.equal(config.apiKey, "secret-value");
   assert.equal(config.model, "deepseek-chat");
   assert.equal(config.autoTranslate, false);
   assert.equal(config.position, "SourceFirst");
   assert.equal(config.aiEnabled, true);
-  assert.equal(config.concurrency, 4);
+  assert.equal(config.concurrency, 12);
   assert.equal(config.maxWaitMs, 6200);
   assert.equal(config.originalFetchTimeoutMs, 1400);
 });
@@ -118,7 +118,8 @@ test("extracts timed JSON3 cues and chunks deterministically", () => {
   );
 });
 
-test("default batching keeps a 962-cue video within one four-request wave", () => {
+test("default batching uses small batches so the first wave returns within the subtitle deadline", () => {
+  // 真机：30 条一批约 2.5～3 秒，Loon 同时约 8 个请求在途；YouTube 等字幕约 7 秒。
   const cues = Array.from({ length: 962 }, (_, id) => ({
     id,
     eventIndex: id,
@@ -127,14 +128,28 @@ test("default batching keeps a 962-cue video within one four-request wave", () =
     text: `Subtitle row ${id}`
   }));
   const config = Core.normalizeConfig({});
-  const chunks = Core.chunkCues(
-    cues,
-    config.maxBatchItems,
-    config.maxBatchChars
-  );
-  assert.equal(chunks.length, 4);
-  assert.equal(config.concurrency, 4);
+  const chunks = Core.chunkCues(cues, config.maxBatchItems, config.maxBatchChars);
+  assert.equal(config.maxBatchItems, 30);
+  assert.equal(config.concurrency, 8);
+  assert.equal(chunks.length, 33);
+  assert.ok(chunks.every((chunk) => chunk.length <= 30));
+  assert.deepEqual(chunks[0].map((cue) => cue.id).slice(0, 3), [0, 1, 2], "按时间顺序，开头先翻");
   assert.equal(chunks.flat().length, 962);
+});
+
+test("salvages usable rows from a batch that drops or duplicates a line", () => {
+  const batch = [0, 1, 2, 3].map((id) => ({ id, text: `line ${id}` }));
+  const rows = Core.salvageTranslations(
+    { translations: [{ id: 0, text: "零" }, { id: 1, text: "一" }, { id: 1, text: "壹" }, { id: 3, text: "三" }] },
+    batch
+  );
+  assert.deepEqual(rows.map((row) => [row.id, row.text]), [[0, "零"], [3, "三"]]);
+  assert.throws(() => Core.salvageTranslations({ translations: [] }, batch), /no usable rows/);
+  const merged = Core.mergeTranslationRows(
+    [{ id: 0, text: "官0" }, { id: 1, text: "官1" }, { id: 2, text: "官2" }],
+    rows
+  );
+  assert.deepEqual(merged.map((row) => row.text), ["零", "官1", "官2", "三"]);
 });
 
 test("builds OpenAI-compatible request with JSON mode and header-only key", () => {
