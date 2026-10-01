@@ -404,7 +404,8 @@
         "INFO",
         `AI rows ${aiRows.length}/${sourceDocument.cues.length} (${percent}%), ` +
           `new ${outcome.rows.length}, failed batches ${outcome.failures.length}, ` +
-          `${Date.now() - scriptStartedAt}ms`
+          `${Date.now() - scriptStartedAt}ms` +
+          (outcome.failures.length ? `, first failure: ${safeError(outcome.failures[0])}` : "")
       );
       if (complete) {
         writeCache(responseCacheKey, { body: aiBody, contentType, result: "ai" }, 86400000);

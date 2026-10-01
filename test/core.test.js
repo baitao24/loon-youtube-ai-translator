@@ -38,7 +38,7 @@ test("normalizes DualSubs AI settings and keeps secrets opaque", () => {
     ai_enabled: "true",
     concurrency: "20"
   });
-  assert.equal(Core.VERSION, "0.4.1");
+  assert.equal(Core.VERSION, "0.4.2");
   assert.equal(config.provider, "OpenAI-Compatible");
   assert.equal(config.apiKey, "secret-value");
   assert.equal(config.model, "deepseek-chat");
@@ -317,4 +317,22 @@ test("response cache identity changes with official content or AI settings", () 
   );
   assert.notEqual(first, second);
   assert.notEqual(first, third);
+});
+
+test("each language is rendered on exactly one line", () => {
+  const forward = { position: "SourceFirst", showOnly: false };
+  assert.equal(
+    Core.combineText(
+      "only 10-15% of the total cost of\nownership of a data center is energy.",
+      "数据中心总拥有成本中，\n只有10%到15%是能源开销。",
+      forward
+    ),
+    "only 10-15% of the total cost of ownership of a data center is energy.\n数据中心总拥有成本中，只有10%到15%是能源开销。"
+  );
+  assert.equal(
+    Core.combineText("a\nb", "甲\n乙", { position: "TranslationFirst", showOnly: false }),
+    "甲乙\na b"
+  );
+  assert.equal(Core.combineText("a\nb", "Hola\nmundo", { showOnly: true }), "Hola mundo");
+  assert.match(Core.buildPrompts([{ id: 0, text: "x" }], "en", "zh-Hans", "").system, /single line/);
 });

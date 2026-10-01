@@ -1,5 +1,5 @@
-#!name = DualSubs AI 双语字幕 0.4 测试版
-#!desc = YouTube AI 双语字幕：开字幕后约 6 秒内尽量多翻，没翻到的行先用官方译文；关闭再打开字幕会继续翻剩下的部分。
+#!name = DualSubs AI 双语字幕（测试版）
+#!desc = YouTube AI 双语字幕：开字幕后约 6 秒内尽量多翻，没翻到的行先显示原文；关闭再打开字幕会继续翻剩下的部分。
 #!author = aot & Codex；基于 DualSubs（Apache-2.0）
 #!homepage = https://github.com/baitao24/loon-youtube-ai-translator/tree/v0.4
 #!tag = YouTube,字幕,DualSubs,AI
