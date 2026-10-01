@@ -9,6 +9,7 @@
   const EVENTS_KEY = "@YTDiag.Events.v1";
   const SAMPLE_KEY = "@YTDiag.Sample.v1";
   const PLAYER_AT_KEY = "@YTDiag.LastPlayerAt.v1";
+  const PLAYER_BY_VIDEO_KEY = "@YTDiag.PlayerByVideo.v1";
   const ARG_NAMES = ["timedtext_delay", "player_delay", "api_key", "model"];
   const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta";
   const startedAt = Date.now();
@@ -232,6 +233,7 @@
     const description = describeSubtitle($response.body);
     const lastPlayerAt = Number(storeRead(PLAYER_AT_KEY) || 0);
     const sincePlayer = lastPlayerAt ? (startedAt - lastPlayerAt) / 1000 : null;
+    const sameVideoPlayerAt = Number(readPlayerByVideo()[params.v] || 0);
     const info = {
       v: params.v || "",
       lang: params.lang || "",
@@ -243,6 +245,7 @@
       cues: description.cues,
       wordTags: description.wordTags || 0,
       sincePlayer: sincePlayer === null ? null : Number(sincePlayer.toFixed(1)),
+      sinceSameVideoPlayer: sameVideoPlayerAt ? Number(((startedAt - sameVideoPlayerAt) / 1000).toFixed(1)) : null,
       delay: config.timedtextDelay
     };
     storeWrite(
@@ -266,19 +269,44 @@
   }
 
   // ---------- 播放器响应 ----------
+  function readPlayerByVideo() {
+    try {
+      const parsed = JSON.parse(storeRead(PLAYER_BY_VIDEO_KEY) || "{}");
+      return parsed && typeof parsed === "object" ? parsed : {};
+    } catch (_) {
+      return {};
+    }
+  }
+
+  function rememberPlayerVideo(videoId) {
+    if (!videoId) return;
+    const map = readPlayerByVideo();
+    map[videoId] = startedAt;
+    const recent = Object.keys(map)
+      .sort((a, b) => map[b] - map[a])
+      .slice(0, 50);
+    storeWrite(JSON.stringify(Object.fromEntries(recent.map((key) => [key, map[key]]))), PLAYER_BY_VIDEO_KEY);
+  }
+
   async function handlePlayer() {
     storeWrite(String(startedAt), PLAYER_AT_KEY);
     const text = bodyToText($response.body, 3000000);
+    const endpoint = ($request.url.match(/\/youtubei\/v1\/([\w/]+)/) || [])[1] || "?";
+    const captionVideo = (text.match(/api\/timedtext\?[^ "]*?\bv=([\w-]{11})/) || [])[1] || "";
+    rememberPlayerVideo(captionVideo);
+    const delayed = endpoint === "player" || endpoint === "get_watch";
     const info = {
       host: $request.url.split("/")[2] || "",
+      endpoint,
+      v: captionVideo,
       bytes: bodyLength($response.body),
       captionUrls: (text.match(/api\/timedtext/g) || []).length,
-      delay: config.playerDelay
+      delay: delayed ? config.playerDelay : 0
     };
-    if (config.playerDelay > 0) {
+    if (delayed && config.playerDelay > 0) {
       addEvent("player", Object.assign({ state: "holding" }, info));
       await sleep(config.playerDelay * 1000);
-      notify(`播放器已在 ${config.playerDelay} 秒后放行`, "请看视频是否正常打开");
+      notify(`${endpoint} 已在 ${config.playerDelay} 秒后放行`, `视频 ${captionVideo || "?"}，请看是否正常打开`);
     }
     addEvent("player", Object.assign({ state: "released", heldMs: Date.now() - startedAt }, info));
     $done({});
@@ -401,7 +429,7 @@
       retry.ms += result.ms;
       result = retry;
     }
-    const outcome = { ms: result.ms, status: result.status, note, thinking: usedThinking };
+    const outcome = { ms: result.ms, status: result.status, note, thinking: usedThinking, expected: lines.length };
     if (result.status !== 200) {
       outcome.error = result.error || redact((result.body || "").slice(0, 300));
       return outcome;
@@ -418,11 +446,19 @@
       const translations = JSON.parse(text.replace(/^```(?:json)?\s*|\s*```$/g, "")).t || [];
       outcome.count = translations.length;
       outcome.ok = translations.length === lines.length;
+      if (!outcome.ok) outcome.sample = translations.slice(-3);
       outcome.preview = translations.slice(0, 3);
     } catch (error) {
       outcome.error = "响应解析失败";
     }
     return outcome;
+  }
+
+  function failureText(item) {
+    if (item.status === 200) {
+      return item.error ? item.error : `条数不对：返回 ${item.count} 条，应为 ${item.expected} 条`;
+    }
+    return `HTTP ${item.status} ${(item.error || "").slice(0, 80)}`;
   }
 
   function median(values) {
@@ -501,11 +537,17 @@
         info.wordTags ? `（逐词 ${info.wordTags}）` : ""
       } · lang=${escapeHtml(info.lang)}${info.kind ? ` kind=${escapeHtml(info.kind)}` : ""}${
         info.tlang ? ` tlang=${escapeHtml(info.tlang)}` : ""
-      } · 视频 ${escapeHtml(info.v)}${info.sincePlayer !== null && info.sincePlayer !== undefined ? ` · 距打开 ${info.sincePlayer}s` : ""}${
+      } · 视频 ${escapeHtml(info.v)}${info.sincePlayer !== null && info.sincePlayer !== undefined ? ` · 距上次播放信息 ${info.sincePlayer}s` : ""}${
+        info.sinceSameVideoPlayer !== null && info.sinceSameVideoPlayer !== undefined
+          ? ` · 距本视频播放信息 ${info.sinceSameVideoPlayer}s`
+          : " · 本视频没抓到播放信息"
+      }${info.delay ? ` · 延迟 ${info.delay}s` : ""}${
         info.heldMs !== undefined ? ` · 共耗 ${(info.heldMs / 1000).toFixed(1)}s` : ""
       }`;
     } else if (event.type === "player") {
-      detail = `${escapeHtml(info.state)} · ${escapeHtml(info.host)} · ${info.bytes} 字节 · 含字幕地址 ${info.captionUrls} 处${
+      detail = `${escapeHtml(info.state)} · ${escapeHtml(info.endpoint || "player")} · ${escapeHtml(info.host)} · 视频 ${escapeHtml(
+        info.v || "?"
+      )} · ${info.bytes} 字节 · 含字幕地址 ${info.captionUrls} 处${info.delay ? ` · 延迟 ${info.delay}s` : ""}${
         info.heldMs !== undefined ? ` · 共耗 ${(info.heldMs / 1000).toFixed(1)}s` : ""
       }`;
     } else if (event.type === "gemini") {
@@ -586,7 +628,7 @@
         .map(
           (item, index) =>
             `<tr><td>${index + 1}</td><td>${(item.ms / 1000).toFixed(2)}s</td><td class="${item.ok ? "ok" : "bad"}">${
-              item.ok ? `${item.count} 条` : `HTTP ${item.status} ${escapeHtml((item.error || "").slice(0, 80))}`
+              item.ok ? `${item.count} 条` : escapeHtml(failureText(item))
             }</td></tr>`
         )
         .join("");
@@ -633,6 +675,7 @@
     if (path.startsWith("/__ytdiag/clear")) {
       storeWrite("[]", EVENTS_KEY);
       storeWrite("", SAMPLE_KEY);
+      storeWrite("{}", PLAYER_BY_VIDEO_KEY);
       return respondHtml(page("已清空", `<h1>已清空</h1>${nav()}`));
     }
     return respondHtml(indexPage());
@@ -644,7 +687,7 @@
   if (/\/__ytdiag(\/|\?|$)/.test(url)) task = handleDiagPage();
   else if (typeof $response === "undefined") task = Promise.resolve($done({}));
   else if (/\/api\/timedtext/.test(url)) task = handleTimedtext();
-  else if (/\/youtubei\/v1\/player/.test(url)) task = handlePlayer();
+  else if (/\/youtubei\/v1\/(player|get_watch|next|reel\/)/.test(url)) task = handlePlayer();
   else task = Promise.resolve($done({}));
 
   task.catch((error) => {

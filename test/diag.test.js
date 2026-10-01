@@ -219,3 +219,66 @@ test("没填 Key 时提示，不发任何请求", async () => {
   });
   assert.match(value.response.body, /没有 API Key/);
 });
+
+test("get_watch 记录接口名和视频 ID，同一视频的字幕请求能算出间隔；next 不延迟", async () => {
+  const store = new Map();
+  const watch = new Uint8Array(Buffer.from("\x0a\x02 https://www.youtube.com/api/timedtext?v=AbCdEfGhIjK&caps=asr&lang=en \x00"));
+  await runDiag({
+    url: "https://youtubei.googleapis.com/youtubei/v1/get_watch?prettyPrint=false",
+    response: { status: 200, headers: {}, body: watch },
+    argument: { player_delay: "0.05" },
+    store
+  });
+  const [watchEvent] = events(store);
+  assert.equal(watchEvent.info.endpoint, "get_watch");
+  assert.equal(watchEvent.info.v, "AbCdEfGhIjK");
+  assert.equal(watchEvent.info.delay, 0.05);
+
+  const begin = Date.now();
+  await runDiag({
+    url: "https://youtubei.googleapis.com/youtubei/v1/next",
+    response: { status: 200, headers: {}, body: new Uint8Array([1, 2, 3]) },
+    argument: { player_delay: "5" },
+    store
+  });
+  assert.ok(Date.now() - begin < 1000, "next 不应被延迟");
+  assert.equal(events(store)[0].info.delay, 0);
+
+  await runDiag({
+    url: "https://www.youtube.com/api/timedtext?v=AbCdEfGhIjK&lang=en",
+    response: { status: 200, headers: {}, body: SRV3 },
+    store
+  });
+  const latest = events(store)[0];
+  assert.ok(latest.info.sinceSameVideoPlayer >= 0 && latest.info.sinceSameVideoPlayer < 5);
+  const { value } = await runDiag({ url: "https://www.youtube.com/__ytdiag/", store });
+  assert.match(value.response.body, /距本视频播放信息/);
+  assert.match(value.response.body, /get_watch/);
+});
+
+test("Gemini 返回条数不对时显示真实原因而不是 HTTP 200", async () => {
+  let call = 0;
+  const { client } = geminiClient({
+    models: [{ name: "models/gemini-3.5-flash-lite", supportedGenerationMethods: ["generateContent"] }],
+    posts: [
+      (body) => {
+        call += 1;
+        const result = okTranslation(body);
+        if (call !== 3) return result;
+        const parsed = JSON.parse(result.body);
+        const text = JSON.parse(parsed.candidates[0].content.parts[0].text);
+        text.t.pop();
+        parsed.candidates[0].content.parts[0].text = JSON.stringify(text);
+        return { status: 200, body: JSON.stringify(parsed) };
+      }
+    ]
+  });
+  const { value } = await runDiag({
+    url: "https://www.youtube.com/__ytdiag/gemini?n=10&c=4",
+    argument: { api_key: KEY },
+    httpClient: client
+  });
+  const html = value.response.body;
+  assert.match(html, /条数不对：返回 9 条，应为 10 条/);
+  assert.doesNotMatch(html, /HTTP 200/);
+});

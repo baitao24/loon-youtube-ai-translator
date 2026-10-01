@@ -4,18 +4,18 @@
 #!homepage = https://github.com/baitao24/loon-youtube-ai-translator/tree/diag/diag
 #!tag = YouTube,诊断
 #!system = iOS,iPadOS
-#!version = 0.1.0
+#!version = 0.2.0
 
 [Argument]
-timedtext_delay = select,"0","5","8","12","20","30",tag=字幕响应延迟（秒）,desc=开字幕后等这么久才把字幕交给 App；用来测 App 最多等几秒
-player_delay = select,"0","5","10","15","25",tag=播放器响应延迟（秒）,desc=打开视频后等这么久才把播放信息交给 App；测字幕时保持 0
+timedtext_delay = select,"0","4","5","6","7","8",tag=字幕响应延迟（秒）,desc=开字幕后等这么久才把字幕交给 App；用来测 App 最多等几秒
+player_delay = select,"0","5","10","15","25",tag=播放信息延迟（秒）,desc=延迟 player 和 get_watch 两个接口；测字幕时保持 0
 api_key = input,"",tag=Gemini API Key,desc=只用于报告页的速度测试；保存在 Loon 本机
 model = input,"",tag=Gemini 模型,desc=留空则自动挑一个 Flash 模型
 
 [Script]
 http-response ^https?:\/\/(www|m)\.youtube\.com\/api\/timedtext(\?.*)?$ requires-body=1, max-size=0, timeout=45, script-path=https://raw.githubusercontent.com/baitao24/loon-youtube-ai-translator/diag/diag/yt-diag.js, tag=诊断·字幕, argument=[{timedtext_delay},{player_delay},{api_key},{model}]
 http-response ^https?:\/\/(www|m)\.youtube\.com\/youtubei\/v1\/player(\?.*)?$ requires-body=1, max-size=0, timeout=40, script-path=https://raw.githubusercontent.com/baitao24/loon-youtube-ai-translator/diag/diag/yt-diag.js, tag=诊断·播放器网页版, argument=[{timedtext_delay},{player_delay},{api_key},{model}]
-http-response ^https?:\/\/youtubei\.googleapis\.com\/youtubei\/v1\/player(\?.*)?$ requires-body=1, binary-body-mode=1, max-size=0, timeout=40, script-path=https://raw.githubusercontent.com/baitao24/loon-youtube-ai-translator/diag/diag/yt-diag.js, tag=诊断·播放器App, argument=[{timedtext_delay},{player_delay},{api_key},{model}]
+http-response ^https?:\/\/youtubei\.googleapis\.com\/youtubei\/v1\/(player|get_watch|next|reel\/\w+)(\?.*)?$ requires-body=1, binary-body-mode=1, max-size=0, timeout=40, script-path=https://raw.githubusercontent.com/baitao24/loon-youtube-ai-translator/diag/diag/yt-diag.js, tag=诊断·播放信息App, argument=[{timedtext_delay},{player_delay},{api_key},{model}]
 http-request ^https?:\/\/(www|m)\.youtube\.com\/__ytdiag.*$ timeout=120, script-path=https://raw.githubusercontent.com/baitao24/loon-youtube-ai-translator/diag/diag/yt-diag.js, tag=诊断·报告页, argument=[{timedtext_delay},{player_delay},{api_key},{model}]
 
 [MITM]
