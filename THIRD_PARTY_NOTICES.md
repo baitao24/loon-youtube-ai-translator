@@ -2,21 +2,15 @@
 
 ## DualSubs
 
-The YouTube player interception (caption track unlocking and automatic
-captions) is provided by `DualSubs/YouTube`.
+Versions up to 0.5.0 loaded the unmodified `DualSubs/YouTube` v1.5.11 request
+and response release bundles for YouTube player interception, and versions
+0.3.x–0.4.x adapted the timestamp alignment of `DualSubs/Universal` v1.7.5.
+Since 0.5.1 the plugin no longer loads or includes any DualSubs code: it only
+intercepts the timedtext subtitle endpoint so it can coexist with YouTube
+ad-block plugins.
 
 Copyright belongs to the respective DualSubs contributors. Those repositories
 are published under the Apache License 2.0.
-
-The generated Loon plugin loads the unmodified `DualSubs/YouTube` v1.5.11
-request and response release bundles directly from the official GitHub release.
-This repository does not redistribute those bundles or generated protobuf
-sources.
-
-Earlier versions (0.3.x–0.4.x) also adapted the timestamp alignment of
-`DualSubs/Universal` v1.7.5 to merge YouTube's official translation. Since
-0.5.0 that code has been removed, because YouTube now rejects official
-translation requests; subtitles are translated by Gemini from the source track.
 
 Project links:
 

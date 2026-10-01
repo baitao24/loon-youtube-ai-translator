@@ -1,6 +1,6 @@
-// YouTube AI bilingual subtitles for Loon v0.5.0
+// YouTube AI bilingual subtitles for Loon v0.5.1
 // Translates the source timedtext response with Gemini; untranslated rows stay as source text.
-// Player adaptation comes from DualSubs YouTube v1.5.11 (Apache-2.0).
+// Only intercepts /api/timedtext so it can run alongside YouTube ad-block plugins.
 // Never logs API keys or full subtitle payloads.
 (function initYouTubeAICore(root, factory) {
   const api = factory();
@@ -9,7 +9,7 @@
 })(typeof globalThis === "object" ? globalThis : this, function createYouTubeAICore() {
   "use strict";
 
-  const VERSION = "0.5.0";
+  const VERSION = "0.5.1";
   const QUERY_FLAG = "dsai";
   // 不能用 "tlang"：2026-10 起 YouTube 对带 tlang 的 timedtext 请求一律返回 429。
   const QUERY_TARGET = "dsai_target";

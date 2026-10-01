@@ -1,12 +1,12 @@
 #!name = YouTube AI 双语字幕
 #!desc = 用 Gemini 把 YouTube 字幕翻成双语。开字幕后约 6 秒内尽量多翻，没翻到的行先显示原文；关掉再打开字幕会接着翻。需要自己的 Gemini API Key。
-#!author = aot & Claude；播放器适配来自 DualSubs（Apache-2.0）
+#!author = aot & Claude
 #!homepage = https://github.com/baitao24/loon-youtube-ai-translator
 #!tag = YouTube,字幕,AI,翻译
 #!system = iOS,iPadOS,macOS
 #!system_version = 15
 #!loon_version = 3.4.0(962)
-#!version = 0.5.0
+#!version = 0.5.1
 
 [Argument]
 ai_enabled = switch,true,tag=AI 翻译,desc=关闭后不做翻译，只显示 YouTube 原文字幕
@@ -15,22 +15,16 @@ model = select,"gemini-3.5-flash-lite","gemini-3.1-flash-lite","gemini-flash-lit
 target_language = select,"简体中文","繁體中文","日本語","한국어","English",tag=翻译成,desc=如果在 YouTube 字幕菜单里选了「自动翻译」成某种语言，以菜单为准
 Position = select,"原文在上","译文在上",tag=字幕顺序,desc=每种语言各占一行
 ShowOnly = switch,false,tag=只显示译文,desc=开启后不显示原文
-AutoCC = switch,true,tag=自动打开字幕,desc=打开视频时自动开启字幕
 custom_prompt = input,"",tag=额外翻译要求,desc=例如：人名保留英文；科技术语按业内习惯翻译。不要在这里填写密钥
 LogLevel = select,"INFO","DEBUG","WARN","ERROR","OFF",tag=日志等级,desc=排查问题时看 Loon 脚本日志；日志不记录 API Key 和字幕全文
 
 [Script]
-# 播放器适配（DualSubs YouTube v1.5.11）：解锁字幕轨、自动打开字幕
-http-request ^https?:\/\/(www|m|tv)\.youtube\.com\/youtubei\/v1\/player(\?.+)?$ requires-body=1, script-path=https://github.com/DualSubs/YouTube/releases/download/v1.5.11/request.bundle.js, tag=DualSubs 播放器请求, argument=[{AutoCC},{LogLevel}]
-http-response ^https?:\/\/(www|m|tv)\.youtube\.com\/youtubei\/v1\/player(\?.+)?$ requires-body=1, script-path=https://github.com/DualSubs/YouTube/releases/download/v1.5.11/response.bundle.js, tag=DualSubs 播放器响应, argument=[{AutoCC},{LogLevel}]
-http-request ^https?:\/\/youtubei\.googleapis\.com\/youtubei\/v1\/player(\?.+)?$ requires-body=1, binary-body-mode=1, script-path=https://github.com/DualSubs/YouTube/releases/download/v1.5.11/request.bundle.js, tag=DualSubs 播放器请求 App, argument=[{AutoCC},{LogLevel}]
-http-response ^https?:\/\/youtubei\.googleapis\.com\/youtubei\/v1\/player(\?.+)?$ requires-body=1, binary-body-mode=1, script-path=https://github.com/DualSubs/YouTube/releases/download/v1.5.11/response.bundle.js, tag=DualSubs 播放器响应 App, argument=[{AutoCC},{LogLevel}]
-http-response ^https?:\/\/youtubei\.googleapis\.com\/youtubei\/v1\/get_watch(\?.+)?$ requires-body=1, binary-body-mode=1, script-path=https://github.com/DualSubs/YouTube/releases/download/v1.5.11/response.bundle.js, tag=DualSubs 播放页响应 App, argument=[{AutoCC},{LogLevel}]
-
+# 只拦截字幕接口（/api/timedtext），不碰 player、get_watch 等播放信息接口，
+# 避免和 YouTube 去广告插件处理同一个请求导致去广告失效
 # AI 翻译：请求阶段去掉 tlang（YouTube 对它返回 429），响应阶段直接翻原文字幕
 http-request ^https?:\/\/(www|m)\.youtube\.com\/api\/timedtext(\?.+)?$ script-path=https://raw.githubusercontent.com/baitao24/loon-youtube-ai-translator/main/dist/dualsubs-ai.bundle.js, timeout=8, tag=AI 字幕请求, argument=[{ai_enabled},{api_key},{model},{target_language},{Position},{ShowOnly},{custom_prompt},{LogLevel}]
 # Loon 按改写前的地址匹配响应规则，所以这里匹配原始 timedtext 地址；脚本内部再检查 dsai 标记
 http-response ^https?:\/\/(www|m)\.youtube\.com\/api\/timedtext(\?.+)?$ requires-body=1, max-size=0, script-path=https://raw.githubusercontent.com/baitao24/loon-youtube-ai-translator/main/dist/dualsubs-ai.bundle.js, timeout=8, tag=AI 字幕响应, argument=[{ai_enabled},{api_key},{model},{target_language},{Position},{ShowOnly},{custom_prompt},{LogLevel}]
 
 [MITM]
-hostname = www.youtube.com, m.youtube.com, tv.youtube.com, youtubei.googleapis.com
+hostname = www.youtube.com, m.youtube.com

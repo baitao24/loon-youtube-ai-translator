@@ -47,7 +47,7 @@ test("existing public subscription filenames remain valid and use the new runtim
 
   assert.equal(legacyRemotePlugin, remotePlugin);
   assert.equal(legacyLocalPlugin, localPlugin);
-  assert.match(remotePlugin, /^#!version = 0\.5\.0$/m);
+  assert.match(remotePlugin, /^#!version = 0\.5\.1$/m);
   // 远程插件必须指向构建时记录的脚本地址（main 或测试分支）
   const manifest = JSON.parse(
     await readFile(path.join(projectRoot, "dist/manifest.json"), "utf8")
@@ -90,13 +90,18 @@ test("local plugin pins DualSubs, exposes AI settings, and has no template marke
 
   assert.doesNotMatch(plugin, /\{\{SCRIPT_URL\}\}/);
   assert.match(plugin, /script-path=dualsubs-ai\.bundle\.js/);
-  assert.match(
-    plugin,
-    /DualSubs\/YouTube\/releases\/download\/v1\.5\.11\/request\.bundle\.js/
+  // 0.5.1：只拦截字幕接口，不和 YouTube 去广告插件抢 player / get_watch 等接口
+  assert.doesNotMatch(plugin, /youtubei|DualSubs\/YouTube\/releases/);
+  assert.deepEqual(
+    scriptLines.map((line) => line.split(" ")[1]),
+    [
+      "^https?:\\/\\/(www|m)\\.youtube\\.com\\/api\\/timedtext(\\?.+)?$",
+      "^https?:\\/\\/(www|m)\\.youtube\\.com\\/api\\/timedtext(\\?.+)?$"
+    ]
   );
+  assert.match(plugin, /^hostname = www\.youtube\.com, m\.youtube\.com$/m);
   // 0.5：只保留真正有用的设置项，模型和语言都是下拉选择
   assert.deepEqual([...definitions].sort(), [
-    "AutoCC",
     "LogLevel",
     "Position",
     "ShowOnly",
@@ -118,5 +123,4 @@ test("local plugin pins DualSubs, exposes AI settings, and has no template marke
         line.includes("\\/api\\/timedtext")
     );
   assert.ok(timedTextResponseRule);
-  assert.match(plugin, /\[MITM\][\s\S]*youtubei\.googleapis\.com/);
 });

@@ -13,7 +13,9 @@
    `https://raw.githubusercontent.com/baitao24/loon-youtube-ai-translator/main/dist/YouTube.AI.Translate.remote.plugin`
 2. 确认 Loon 已开启 MITM 并信任证书。
 3. 在插件设置里填写 Gemini API Key（在 [Google AI Studio](https://aistudio.google.com/apikey) 创建）。
-4. 关闭其他会处理 YouTube 字幕的插件（官方 DualSubs、旧版翻译插件等），否则会重复处理同一条字幕请求。去广告插件可以保留。
+4. 关闭其他会处理 YouTube 字幕的插件（DualSubs、旧版翻译插件等），否则会重复处理同一条字幕请求。
+
+可以和 YouTube 去广告插件一起用：本插件只拦截字幕接口 `/api/timedtext`，不碰 `player`、`get_watch` 等去广告插件需要处理的接口。
 
 ## 设置项
 
@@ -25,7 +27,6 @@
 | 翻译成 | 简体中文、繁體中文、日本語、한국어、English。在 YouTube 字幕菜单里选了「自动翻译」成某种语言时，以菜单为准 |
 | 字幕顺序 | 原文在上 / 译文在上 |
 | 只显示译文 | 开启后不显示原文 |
-| 自动打开字幕 | 打开视频时自动开启字幕 |
 | 额外翻译要求 | 例如“人名保留英文”“科技术语按业内习惯翻译” |
 | 日志等级 | 排查问题时用；日志不记录 API Key 和字幕全文 |
 
@@ -47,7 +48,7 @@ YouTube App 开字幕时会一次性请求整份字幕（`/api/timedtext`）。�
 
 每批还会附带前两行原文作为上下文，避免一句话被切在两批之间时译得生硬。
 
-播放器层（解锁字幕轨、自动打开字幕）直接加载 [DualSubs/YouTube](https://github.com/DualSubs/YouTube) v1.5.11 的官方发布脚本。
+插件只处理字幕请求，不修改播放信息。0.5.0 及以前会顺带加载 DualSubs 的播放器脚本，它和去广告插件拦截同一批接口，会让去广告失效，0.5.1 起已移除。YouTube App 会记住上次是否开着字幕，一般不需要自动打开。
 
 ## 常见问题
 
@@ -56,6 +57,9 @@ YouTube App 开字幕时会一次性请求整份字幕（`/api/timedtext`）。�
 
 **长视频后半段只有英文？**
 第一次开字幕的时间只够翻开头一部分。关掉字幕再打开，插件会只翻剩下的行，通常两三次就能翻完，之后直接用缓存。
+
+**装了本插件后去广告失效？**
+请更新到 0.5.1 或更高版本。旧版本带有 DualSubs 播放器脚本，会和去广告插件抢同一批接口。
 
 **字幕显示 error loading？**
 先确认 MITM 证书已信任、没有其他字幕插件同时启用。然后在 Loon 的脚本日志里找「AI 字幕响应」，把日志截图用于排查。
@@ -106,4 +110,4 @@ npm run build -- --script-url "https://raw.githubusercontent.com/baitao24/loon-y
 
 ## 许可证
 
-本项目采用 MIT License。播放器适配加载的 DualSubs 脚本采用 Apache License 2.0，详见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+本项目采用 MIT License。早期版本参考过 DualSubs（Apache License 2.0），详见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。

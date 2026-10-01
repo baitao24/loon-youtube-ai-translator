@@ -29,7 +29,7 @@ const pluginTemplate = await readFile(
 const banner = [
   `// YouTube AI bilingual subtitles for Loon v${pkg.version}`,
   "// Translates the source timedtext response with Gemini; untranslated rows stay as source text.",
-  "// Player adaptation comes from DualSubs YouTube v1.5.11 (Apache-2.0).",
+  "// Only intercepts /api/timedtext so it can run alongside YouTube ad-block plugins.",
   "// Never logs API keys or full subtitle payloads.",
   ""
 ].join("\n");
