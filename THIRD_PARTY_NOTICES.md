@@ -2,11 +2,8 @@
 
 ## DualSubs
 
-The YouTube player interception, `Official` subtitle baseline, timestamp
-alignment, and bilingual composition behavior are based on:
-
-- `DualSubs/YouTube`
-- `DualSubs/Universal`
+The YouTube player interception (caption track unlocking and automatic
+captions) is provided by `DualSubs/YouTube`.
 
 Copyright belongs to the respective DualSubs contributors. Those repositories
 are published under the Apache License 2.0.
@@ -16,10 +13,10 @@ request and response release bundles directly from the official GitHub release.
 This repository does not redistribute those bundles or generated protobuf
 sources.
 
-The local `composeOfficialSubtitles` implementation follows the timestamp
-two-pointer alignment behavior of `DualSubs/Universal` v1.7.5, adapted to the
-narrow YouTube JSON3 and srv3 paths and combined with this project's AI
-translation, deadline, cache, and official-fallback logic.
+Earlier versions (0.3.x–0.4.x) also adapted the timestamp alignment of
+`DualSubs/Universal` v1.7.5 to merge YouTube's official translation. Since
+0.5.0 that code has been removed, because YouTube now rejects official
+translation requests; subtitles are translated by Gemini from the source track.
 
 Project links:
 

@@ -47,7 +47,7 @@ test("existing public subscription filenames remain valid and use the new runtim
 
   assert.equal(legacyRemotePlugin, remotePlugin);
   assert.equal(legacyLocalPlugin, localPlugin);
-  assert.match(remotePlugin, /^#!version = 0\.4\.2$/m);
+  assert.match(remotePlugin, /^#!version = 0\.5\.0$/m);
   // 远程插件必须指向构建时记录的脚本地址（main 或测试分支）
   const manifest = JSON.parse(
     await readFile(path.join(projectRoot, "dist/manifest.json"), "utf8")
@@ -94,16 +94,22 @@ test("local plugin pins DualSubs, exposes AI settings, and has no template marke
     plugin,
     /DualSubs\/YouTube\/releases\/download\/v1\.5\.11\/request\.bundle\.js/
   );
-  assert.match(plugin, /Type = select,"Official"/);
-  assert.match(plugin, /ai_enabled = switch,true/);
-  assert.match(plugin, /provider = select,"Gemini","OpenAI-Compatible"/);
-  assert.match(plugin, /model = input,"gemini-3\.5-flash-lite"/);
-  assert.match(plugin, /Position = select,"Reverse","Forward"/);
-  assert.match(plugin, /batch_size = select,"30","20","40","60"/);
-  assert.match(plugin, /parallel = select,"8","4","6","10"/);
-  assert.match(plugin, /timeout_ms = select,"5200","4000","6000"/);
-  assert.match(plugin, /max_wait_ms = select,"6200","5000","5800","6500"/);
-  assert.match(plugin, /subtype=Official/);
+  // 0.5：只保留真正有用的设置项，模型和语言都是下拉选择
+  assert.deepEqual([...definitions].sort(), [
+    "AutoCC",
+    "LogLevel",
+    "Position",
+    "ShowOnly",
+    "ai_enabled",
+    "api_key",
+    "custom_prompt",
+    "model",
+    "target_language"
+  ]);
+  assert.match(plugin, /^model = select,"gemini-3\.5-flash-lite",/m);
+  assert.match(plugin, /^target_language = select,"简体中文",/m);
+  assert.match(plugin, /^Position = select,"原文在上","译文在上"/m);
+  assert.doesNotMatch(plugin, /subtype=Official|tlang=|googlevideo/);
   const timedTextResponseRule = plugin
     .split("\n")
     .find(
@@ -112,6 +118,5 @@ test("local plugin pins DualSubs, exposes AI settings, and has no template marke
         line.includes("\\/api\\/timedtext")
     );
   assert.ok(timedTextResponseRule);
-  assert.doesNotMatch(timedTextResponseRule, /subtype=Official/);
   assert.match(plugin, /\[MITM\][\s\S]*youtubei\.googleapis\.com/);
 });

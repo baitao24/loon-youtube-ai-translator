@@ -38,7 +38,7 @@ test("normalizes DualSubs AI settings and keeps secrets opaque", () => {
     ai_enabled: "true",
     concurrency: "20"
   });
-  assert.equal(Core.VERSION, "0.4.2");
+  assert.equal(Core.VERSION, "0.5.0");
   assert.equal(config.provider, "OpenAI-Compatible");
   assert.equal(config.apiKey, "secret-value");
   assert.equal(config.model, "deepseek-chat");
@@ -77,17 +77,6 @@ test("rewrites timedtext to the source track and never keeps tlang", () => {
   );
   assert.equal(new URL(unconfigured.url).searchParams.has("tlang"), false);
   assert.equal(unconfigured.reason, "missing-config");
-});
-
-test("builds the original subtitle URL without recursive interception markers", () => {
-  const prepared =
-    "https://www.youtube.com/api/timedtext?v=abc&lang=en&tlang=zh-Hans&fmt=json3&subtype=Official&dsai=1";
-  const original = new URL(Core.originalSubtitleUrl(prepared));
-  assert.equal(original.searchParams.get("lang"), "en");
-  assert.equal(original.searchParams.get("fmt"), "json3");
-  assert.equal(original.searchParams.has("tlang"), false);
-  assert.equal(original.searchParams.has("subtype"), false);
-  assert.equal(original.searchParams.has("dsai"), false);
 });
 
 test("extracts timed JSON3 cues and chunks deterministically", () => {
@@ -261,42 +250,6 @@ test("renders AI bilingual JSON3 without changing source timing", () => {
   assert.equal(rendered.events[0].wWinId, undefined);
 });
 
-test("composes official JSON3 fallback by timestamp like DualSubs", () => {
-  const composed = Core.composeOfficialSubtitles(
-    JSON.stringify(sourceJson3()),
-    "application/json",
-    JSON.stringify(translatedJson3()),
-    "application/json",
-    Core.normalizeConfig({ Position: "Reverse", alignment_tolerance_ms: 10 })
-  );
-  const body = JSON.parse(composed.body);
-  assert.equal(composed.matchedCues, 2);
-  assert.equal(composed.matchRate, 1);
-  assert.equal(body.events[0].segs[0].utf8, "你好世界\nHello world");
-  assert.equal(body.events[1].segs[0].utf8, "你好吗？\nHow are you?");
-});
-
-test("composes official srv3 fallback and preserves paragraph timing", () => {
-  const source =
-    '<?xml version="1.0"?><timedtext format="3"><body>' +
-    '<p t="10" d="20"><s>Hello</s></p><p t="30" d="40"><s>World</s></p>' +
-    "</body></timedtext>";
-  const translated =
-    '<?xml version="1.0"?><timedtext format="3"><body>' +
-    '<p t="10" d="20"><s>你好</s></p><p t="30" d="40"><s>世界</s></p>' +
-    "</body></timedtext>";
-  const composed = Core.composeOfficialSubtitles(
-    source,
-    "text/xml",
-    translated,
-    "text/xml",
-    Core.normalizeConfig({ Position: "Reverse" })
-  );
-  assert.match(composed.body, /<p t="10" d="20"><s>你好&#10;Hello<\/s><\/p>/);
-  assert.match(composed.body, /<p t="30" d="40"><s>世界&#10;World<\/s><\/p>/);
-  assert.equal(composed.contentType, "application/xml; charset=utf-8");
-});
-
 test("response cache identity changes with official content or AI settings", () => {
   const url =
     "https://www.youtube.com/api/timedtext?v=abc&lang=en&tlang=zh-Hans&subtype=Official";
@@ -335,4 +288,34 @@ test("each language is rendered on exactly one line", () => {
   );
   assert.equal(Core.combineText("a\nb", "Hola\nmundo", { showOnly: true }), "Hola mundo");
   assert.match(Core.buildPrompts([{ id: 0, text: "x" }], "en", "zh-Hans", "").system, /single line/);
+});
+
+test("plugin dropdown labels map to config values", () => {
+  const config = Core.normalizeConfig({ target_language: "繁體中文", Position: "原文在上" });
+  assert.equal(config.targetLanguage, "zh-Hant");
+  assert.equal(config.position, "SourceFirst");
+  assert.equal(Core.normalizeConfig({ Position: "译文在上" }).position, "TranslationFirst");
+  assert.equal(Core.normalizeConfig({ target_language: "日本語" }).targetLanguage, "ja");
+  assert.equal(Core.normalizeConfig({ target_language: "es" }).targetLanguage, "es");
+  assert.equal(Core.normalizeConfig({}).provider, "Gemini");
+});
+
+test("Gemini request carries context rows and can omit thinkingLevel", () => {
+  const batch = [{ id: 5, text: "does, we need to go back" }];
+  batch.context = ["For the past 2 months", "To understand what it"];
+  const base = Core.normalizeConfig({ api_key: "k", model: "gemini-test" });
+  const withThinking = JSON.parse(
+    Core.createGeminiRequest(base, batch, { source: "en", target: "zh-Hans" }, true).body
+  );
+  const user = JSON.parse(withThinking.contents[0].parts[0].text);
+  assert.deepEqual(user.context_before, batch.context);
+  assert.deepEqual(user.subtitles, [{ id: 5, text: "does, we need to go back" }]);
+  assert.match(withThinking.systemInstruction.parts[0].text, /never translate or return it/);
+  assert.equal(withThinking.generationConfig.thinkingConfig.thinkingLevel, "minimal");
+
+  const off = JSON.parse(
+    Core.createGeminiRequest({ ...base, thinkingLevel: "off" }, [{ id: 0, text: "x" }], { source: "en", target: "zh-Hans" }, true).body
+  );
+  assert.equal(off.generationConfig.thinkingConfig, undefined);
+  assert.equal(JSON.parse(off.contents[0].parts[0].text).context_before, undefined);
 });

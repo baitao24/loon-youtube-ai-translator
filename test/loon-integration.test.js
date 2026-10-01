@@ -406,3 +406,51 @@ test("a batch that drops one line keeps the other AI rows", async () => {
   assert.deepEqual(events, Array.from({ length: 10 }, (_, i) => (i === 3 ? "Line 3" : `AI${i}\nLine ${i}`)));
   assert.equal(result.doneValue.headers["x-dualsubs-ai-result"], "ai-partial");
 });
+
+test("models that reject thinkingLevel are retried without it and remembered", async () => {
+  const store = new Map();
+  const seen = [];
+  const run = () =>
+    runLoon({
+      argument: { ...config(), model: "gemini-2.5-flash-lite" },
+      request: { url: processedUrl("json3", `nothink${seen.length}`), method: "GET", headers: {} },
+      response: { status: 200, headers: { "Content-Type": "application/json" }, body: sourceJson3() },
+      store,
+      httpClient: {
+        get: noGet,
+        post(request, callback) {
+          const body = JSON.parse(request.body);
+          seen.push(Boolean(body.generationConfig.thinkingConfig));
+          if (body.generationConfig.thinkingConfig) {
+            callback(null, { status: 400 }, JSON.stringify({ error: { message: "thinking_level is not supported for this model" } }));
+            return;
+          }
+          successfulGemini(callback);
+        }
+      }
+    });
+  const first = await run();
+  assert.equal(first.doneValue.headers["x-dualsubs-ai-result"], "ai");
+  assert.deepEqual(seen, [true, false]);
+  await run();
+  assert.deepEqual(seen, [true, false, false], "第二次直接不带 thinkingLevel");
+});
+
+test("each batch sends the two preceding source rows as context", async () => {
+  const contexts = [];
+  await runLoon({
+    argument: { ...config(), parallel: "1", batch_size: "5" },
+    request: { url: processedUrl("json3", "ctx"), method: "GET", headers: {} },
+    response: { status: 200, headers: { "Content-Type": "application/json" }, body: tenCueJson3("Line ") },
+    httpClient: {
+      get: noGet,
+      post(request, callback) {
+        const user = JSON.parse(JSON.parse(request.body).contents[0].parts[0].text);
+        contexts.push(user.context_before || []);
+        const ids = user.subtitles.map((row) => row.id);
+        callback(null, { status: 200 }, geminiRows(ids.map((id) => ({ id, text: `AI${id}` }))));
+      }
+    }
+  });
+  assert.deepEqual(contexts, [[], ["Line 3", "Line 4"]]);
+});

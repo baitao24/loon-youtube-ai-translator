@@ -1,142 +1,109 @@
-# DualSubs AI 双语字幕（Loon）
+# YouTube AI 双语字幕（Loon 插件）
 
-这是一个基于 DualSubs 稳定 YouTube 适配层的 AI 增强插件。
+在 iPhone / iPad 的 YouTube App 里，用 Gemini 把字幕翻成双语：一行原文，一行译文。
 
-它不会把 AI 当成字幕显示的唯一条件：
+- 打开字幕后约 6 秒内尽量多翻，十几分钟以内的视频通常一次翻完
+- 长视频第一次只能翻开头一部分，没翻到的行先显示原文；关掉再打开字幕，会接着翻剩下的部分
+- 翻好的结果会缓存，同一个视频再看不用重新翻
+- 只需要自己的 Gemini API Key，不需要部署任何服务
 
-1. DualSubs 先解锁 YouTube 字幕轨和自动翻译语言。
-2. YouTube 返回官方译文，作为始终可用的安全底座。
-3. 插件获取同一视频的原文字幕，并尝试 Gemini 或 OpenAI-Compatible 翻译。
-4. AI 按时完成时显示“原文 + AI 译文”。
-5. AI 超时、限流、输出错位或配置缺失时显示“原文 + YouTube 官方译文”。
-6. 原文获取也失败时至少保留 YouTube 官方译文，不返回空白字幕。
+## 安装
 
-## 支持范围
+1. [一键导入 Loon](https://www.nsloon.com/openloon/import?plugin=https%3A%2F%2Fraw.githubusercontent.com%2Fbaitao24%2Floon-youtube-ai-translator%2Fmain%2Fdist%2FYouTube.AI.Translate.remote.plugin)，或手动添加订阅地址：
+   `https://raw.githubusercontent.com/baitao24/loon-youtube-ai-translator/main/dist/YouTube.AI.Translate.remote.plugin`
+2. 确认 Loon 已开启 MITM 并信任证书。
+3. 在插件设置里填写 Gemini API Key（在 [Google AI Studio](https://aistudio.google.com/apikey) 创建）。
+4. 关闭其他会处理 YouTube 字幕的插件（官方 DualSubs、旧版翻译插件等），否则会重复处理同一条字幕请求。去广告插件可以保留。
 
-- YouTube iOS/iPadOS/macOS 客户端中已有的人工字幕或自动字幕
-- JSON3 与 srv3/XML 字幕格式
-- Gemini 原生 `generateContent`
-- OpenAI-Compatible `chat/completions`
-- 自定义 API Key、Base URL、模型、目标语言、提示词
-- AI/官方译文在上或原文在上
-- 成功结果缓存，以及 AI 失败后的短时官方兜底缓存
+## 设置项
 
-暂不包含：
+| 设置 | 说明 |
+| --- | --- |
+| AI 翻译 | 总开关。关闭后只显示 YouTube 原文字幕 |
+| Gemini API Key | 只保存在本机 Loon 里。建议在 Google 后台设置用量上限 |
+| 模型 | 默认 `gemini-3.5-flash-lite`，真机实测最快。不带 lite 的模型更细致但更慢，长视频第一次能翻到的比例会变少 |
+| 翻译成 | 简体中文、繁體中文、日本語、한국어、English。在 YouTube 字幕菜单里选了「自动翻译」成某种语言时，以菜单为准 |
+| 字幕顺序 | 原文在上 / 译文在上 |
+| 只显示译文 | 开启后不显示原文 |
+| 自动打开字幕 | 打开视频时自动开启字幕 |
+| 额外翻译要求 | 例如“人名保留英文”“科技术语按业内习惯翻译” |
+| 日志等级 | 排查问题时用；日志不记录 API Key 和字幕全文 |
 
-- 无字幕视频的语音识别
-- YouTube Music 歌词 AI 翻译
-- tvOS YouTube App
-- 向 YouTube App 内注入模型选择按钮
+## 工作原理
 
-模型和密钥均在 Loon 插件设置中填写。
+YouTube App 开字幕时会一次性请求整份字幕（`/api/timedtext`）。插件在 Loon 里拦截这份字幕，交给 Gemini 翻译，再改写成双语返回给 App。
 
-## 与旧版的关键差异
+几个关键限制，都是真机实测得到的（2026-10）：
 
-旧版直接拦截原字幕并等待 AI。AI 未在 YouTube 的短等待窗口内完成时，只能返回原文，甚至可能让客户端显示字幕加载失败。
+| 实测项 | 结果 | 插件的做法 |
+| --- | --- | --- |
+| YouTube App 等字幕的上限 | 7 秒能显示，8 秒报错 | 最多用 6.2 秒，到点就带着已翻好的部分返回 |
+| Gemini 3.5 Flash-Lite 速度 | 30 条一批约 2.5～3 秒 | 每批 30 条，按时间顺序翻，开头最先翻好 |
+| Loon 同时在途的请求数 | 约 8 个，再多会排队 | 并发 8 |
+| 模型偶尔少返回一行 | 约每 20 批 1 次 | 按行校验，缺的行显示原文，其余照用 |
+| YouTube 官方机翻（`tlang` 参数） | 一律返回 429 拦截页 | 不再请求官方机翻，并去掉 App 自带的 `tlang` |
 
-`0.3.1` 改为 DualSubs Official 基线：
+按这个速度，一次开字幕大约能翻 400～500 条，相当于视频开头 15～20 分钟。
 
-- 不删除 `tlang`
-- 不强制把 srv3 改成 JSON3
-- 不等待 AI 才决定是否有字幕
-- AI 失败时仍然得到官方双语字幕
-- 复用 DualSubs v1.5.11 的播放器 JSON/Protobuf 适配
+每批还会附带前两行原文作为上下文，避免一句话被切在两批之间时译得生硬。
 
-## 安装产物
+播放器层（解锁字幕轨、自动打开字幕）直接加载 [DualSubs/YouTube](https://github.com/DualSubs/YouTube) v1.5.11 的官方发布脚本。
 
-### 在线安装
+## 常见问题
 
-- [一键导入 Loon](https://www.nsloon.com/openloon/import?plugin=https%3A%2F%2Fraw.githubusercontent.com%2Fbaitao24%2Floon-youtube-ai-translator%2Fmain%2Fdist%2FYouTube.AI.Translate.remote.plugin)
-- [远程插件订阅地址](https://raw.githubusercontent.com/baitao24/loon-youtube-ai-translator/main/dist/YouTube.AI.Translate.remote.plugin)
+**怎么确认是 AI 翻的？**
+插件不再使用任何机器翻译。屏幕上出现的译文都来自 Gemini；没翻到的行只显示原文。
 
-`0.2.x` 使用的订阅文件名和脚本文件名继续保留，因此已有用户刷新原资源即可升级；无需删除后重新导入，也更有机会保留 Loon 已保存的参数。API Key 不会包含在订阅中。
+**长视频后半段只有英文？**
+第一次开字幕的时间只够翻开头一部分。关掉字幕再打开，插件会只翻剩下的行，通常两三次就能翻完，之后直接用缓存。
 
-### 本地构建
+**字幕显示 error loading？**
+先确认 MITM 证书已信任、没有其他字幕插件同时启用。然后在 Loon 的脚本日志里找「AI 字幕响应」，把日志截图用于排查。
+
+**日志怎么看？**
+「AI 字幕响应」的日志里有一行类似：
+
+```
+AI rows 448/1422 (31%), new 448, failed batches 0, 5711ms
+```
+
+依次是已翻行数 / 总行数、本次新翻的行数、失败的批次数、耗时。有失败批次时，行尾会附上第一个失败原因。
+
+响应头 `x-dualsubs-ai-result` 标明结果：
+
+| 值 | 含义 |
+| --- | --- |
+| `ai` | 全部由 AI 翻译 |
+| `ai-partial` | 部分由 AI 翻译，其余显示原文 |
+| `cache-ai` | 命中缓存 |
+| `source-only` | AI 未启用、未配置或失败，只显示原文 |
+| `upstream-error` | YouTube 本身返回了错误，原样放行 |
+| `skipped` | 不是插件处理的请求 |
+
+## 隐私
+
+字幕文本会直接发给 Google Gemini 翻译。本项目没有中转服务器、账号系统或遥测。
+
+翻译结果缓存在 Loon 本机（`$persistentStore`），缓存里不包含 API Key。Loon 插件的输入框不是系统钥匙串，建议使用设了用量上限、可随时撤销的 API Key。
+
+## 诊断工具
+
+[`diag` 分支](https://github.com/baitao24/loon-youtube-ai-translator/tree/diag/diag)里有一个临时诊断插件，可以测 YouTube 等待字幕的上限和 Gemini 从手机调用的速度。上面的实测数据就是用它测的。它会故意延迟字幕，测完要关闭。
+
+## 开发
 
 ```bash
 npm run verify
 ```
 
-生成：
+会构建 `dist/`、做语法检查并运行全部测试。自动测试不能替代真机验收，改动发布前要在 iPhone 上用真实视频确认字幕画面和 Loon 日志。
 
-- `dist/dualsubs-ai.bundle.js`
-- `dist/DualSubs.AI.YouTube.local.plugin`
-- `dist/DualSubs.AI.YouTube.remote.plugin`
-- `dist/manifest.json`
-
-同时生成旧版兼容路径：
-
-- `dist/yt-ai.bundle.js`
-- `dist/YouTube.AI.Translate.local.plugin`
-- `dist/YouTube.AI.Translate.remote.plugin`
-
-如需让远程插件改用其他脚本地址：
+构建测试分支时，让远程插件指向该分支的脚本：
 
 ```bash
-npm run build -- --script-url "https://example.com/dualsubs-ai.bundle.js"
+npm run build -- --script-url "https://raw.githubusercontent.com/baitao24/loon-youtube-ai-translator/<分支>/dist/dualsubs-ai.bundle.js"
 ```
 
-不要同时启用官方 DualSubs YouTube 插件或旧的 YouTube AI 插件，因为它们会重复处理同一条 `timedtext` 请求。YouTube 去广告插件可以保留，但应关闭其中的字幕翻译功能，并按 DualSubs 文档把去广告插件置于本插件上方。
+## 许可证
 
-## Loon 设置
-
-主要选项：
-
-- `启用 AI 增强`：关闭后仍然使用 DualSubs 官方双语字幕。
-- `AI 服务商`：Gemini 或 OpenAI-Compatible。
-- `API Key`：只保存在 Loon 本机参数中。
-- `模型名称`：默认 `gemini-3.6-flash`；更重视速度可选择 `gemini-3.5-flash-lite`。
-- `默认目标语言`：默认 `zh-Hans`，YouTube 自动翻译菜单所选语言优先。
-- `字幕顺序`：`Reverse` 为译文在上，`Forward` 为原文在上。
-- `每批字幕条数`：默认 250，配合四路并发，让约千条字幕尽量在一轮请求内完成。
-- `字幕最大等待`：默认 6200 毫秒；达到期限立即使用官方双语字幕。
-
-Gemini 3.x 默认使用 `minimal` 思考等级，并采用 `responseMimeType` + `responseSchema`。请求不携带已弃用的 `temperature`、`top_p`、`top_k`。
-
-OpenAI-Compatible 默认使用 JSON Mode；服务商返回 400、404 或 422 时，会在剩余时限内去掉 `response_format` 重试一次。
-
-## 结果判断
-
-Loon 请求记录中的响应头会标明路径：
-
-- `x-dualsubs-ai-result: ai`：AI 双语字幕
-- `x-dualsubs-ai-result: cache-ai`：AI 缓存
-- `x-dualsubs-ai-result: official`：AI 未启用或配置缺失，使用官方双语
-- `x-dualsubs-ai-result: official-fallback`：AI 失败或超时，使用官方双语
-- `x-dualsubs-ai-result: official-only`：原字幕获取失败，仅保留官方译文
-
-错误头会脱敏，不包含 API Key 或字幕正文。
-
-## 缓存与隐私
-
-字幕正文会直接发送到你选择的模型服务商。本项目没有中转服务器、账号系统或遥测。
-
-最终字幕缓存保存在 Loon `$persistentStore`，缓存身份包含视频、语言、模型、提示词、字幕顺序及官方响应摘要，但不包含 API Key。AI 成功结果默认缓存一天；AI 失败的官方兜底只缓存 30 秒，避免持续超时又不会永久阻止后续 AI 重试。
-
-Loon 插件的 `input` 不是系统钥匙串。建议使用带额度和来源限制、可随时撤销的 API Key。
-
-## 开发验证
-
-```bash
-npm run verify
-```
-
-验证覆盖：
-
-- DualSubs Official 请求准备及格式保持
-- JSON3 与 srv3 原文/官方译文对齐
-- Gemini 与 OpenAI-Compatible 请求和结构化响应
-- AI 成功、配置缺失、API 失败、原文获取失败
-- 官方双语兜底永不为空
-- 最终字幕缓存
-- 962 条字幕的一轮四请求分批策略
-- 构建产物哈希、上游版本固定和敏感值扫描
-
-自动测试不能替代 iPhone 真机验收。发布前必须在真实 YouTube 视频上确认请求头、字幕画面、耗时、缓存和超时回退。
-
-## 上游与许可证
-
-- [DualSubs/YouTube](https://github.com/DualSubs/YouTube)，固定 `v1.5.11`
-- [DualSubs/Universal](https://github.com/DualSubs/Universal)，对齐和双语合成参考 `v1.7.5`
-
-DualSubs 采用 Apache License 2.0。本项目保留上游归属和许可证说明，详情见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+本项目采用 MIT License。播放器适配加载的 DualSubs 脚本采用 Apache License 2.0，详见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。

@@ -27,9 +27,9 @@ const pluginTemplate = await readFile(
 );
 
 const banner = [
-  `// DualSubs AI bilingual subtitles for Loon v${pkg.version}`,
-  "// DualSubs YouTube v1.5.11 compatibility layer + Gemini/OpenAI-Compatible enhancement",
-  "// Official YouTube translation remains the safe fallback.",
+  `// YouTube AI bilingual subtitles for Loon v${pkg.version}`,
+  "// Translates the source timedtext response with Gemini; untranslated rows stay as source text.",
+  "// Player adaptation comes from DualSubs YouTube v1.5.11 (Apache-2.0).",
   "// Never logs API keys or full subtitle payloads.",
   ""
 ].join("\n");

@@ -10,6 +10,10 @@
   // 剩余时间不够一批正常耗时（真机 2～3 秒）就不再发新批次。
   const MIN_LAUNCH_MS = 2000;
   const RENDER_RESERVE_MS = 150;
+  // 记住不接受 thinkingLevel 的模型，下次直接不带这个参数
+  const NO_THINKING_KEY = "@DualSubs-AI.NoThinkingModels.v1";
+  // 每批附带前面几行原文作上下文，避免句子被批次切断后译得生硬
+  const CONTEXT_ROWS = 2;
   const LOG_LEVELS = { OFF: 99, ERROR: 40, WARN: 30, INFO: 20, DEBUG: 10 };
   const CLIENT_SAFE_MAX_WAIT_MS = 6200;
   const config = Core.normalizeConfig(
@@ -135,6 +139,7 @@
         if (status < 200 || status >= 300) {
           const failure = new Error(`AI HTTP ${status || "unknown"}`);
           failure.status = status;
+          failure.body = String(body || "").slice(0, 400);
           reject(failure);
           return;
         }
@@ -159,14 +164,26 @@
       try {
         const requestConfig = requestConfigWithinDeadline();
         if (config.provider === "Gemini") {
-          const request = Core.createGeminiRequest(
-            requestConfig,
-            batch,
-            languages,
-            true
-          );
-          const raw = await httpPost(request);
-          return Core.salvageTranslations(Core.parseGeminiResponse(raw), batch);
+          try {
+            const raw = await httpPost(Core.createGeminiRequest(requestConfig, batch, languages, true));
+            return Core.salvageTranslations(Core.parseGeminiResponse(raw), batch);
+          } catch (error) {
+            if (error?.status !== 400 || config.thinkingLevel === "off" || !/thinking/i.test(error.body || "")) {
+              throw error;
+            }
+            log("INFO", `${config.model} does not accept thinkingLevel; retrying without it`);
+            config.thinkingLevel = "off";
+            rememberNoThinking(config.model);
+            const raw = await httpPost(
+              Core.createGeminiRequest(
+                Object.assign({}, requestConfigWithinDeadline(), { thinkingLevel: "off" }),
+                batch,
+                languages,
+                true
+              )
+            );
+            return Core.salvageTranslations(Core.parseGeminiResponse(raw), batch);
+          }
         }
 
         try {
@@ -230,6 +247,37 @@
     clearTimeout(timer);
     finished = true;
     return { rows: rows.slice(), failures, launched: nextIndex };
+  }
+
+  function noThinkingModels() {
+    try {
+      const parsed = JSON.parse(
+        (typeof $persistentStore === "undefined" ? null : $persistentStore.read(NO_THINKING_KEY)) || "[]"
+      );
+      return Array.isArray(parsed) ? parsed : [];
+    } catch (_) {
+      return [];
+    }
+  }
+
+  function rememberNoThinking(model) {
+    try {
+      const models = noThinkingModels();
+      if (!models.includes(model) && typeof $persistentStore !== "undefined") {
+        $persistentStore.write(JSON.stringify(models.concat(model).slice(-20)), NO_THINKING_KEY);
+      }
+    } catch (_) {
+      // 只是优化，写不进去下次再试
+    }
+  }
+
+  function attachContext(batches, cues) {
+    const indexById = new Map(cues.map((cue, index) => [cue.id, index]));
+    batches.forEach((batch) => {
+      const first = indexById.get(batch[0]?.id) || 0;
+      batch.context = cues.slice(Math.max(0, first - CONTEXT_ROWS), first).map((cue) => cue.text);
+    });
+    return batches;
   }
 
   function loadRowStore() {
@@ -380,7 +428,13 @@
       const rowsKey = Core.makeCacheKey($request.url, config, sourceDocument.cues, languages);
       const known = readRows(rowsKey);
       const pending = sourceDocument.cues.filter((cue) => !known.has(String(cue.id)));
-      const batches = Core.chunkCues(pending, config.maxBatchItems, config.maxBatchChars);
+      const batches = attachContext(
+        Core.chunkCues(pending, config.maxBatchItems, config.maxBatchChars),
+        sourceDocument.cues
+      );
+      if (config.provider === "Gemini" && noThinkingModels().includes(config.model)) {
+        config.thinkingLevel = "off";
+      }
       log(
         "INFO",
         `AI translating ${pending.length}/${sourceDocument.cues.length} cues in ${batches.length} batch(es) via ${config.provider}`
