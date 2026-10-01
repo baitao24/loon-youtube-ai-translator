@@ -38,7 +38,7 @@ test("normalizes DualSubs AI settings and keeps secrets opaque", () => {
     ai_enabled: "true",
     concurrency: "20"
   });
-  assert.equal(Core.VERSION, "0.4.0");
+  assert.equal(Core.VERSION, "0.4.1");
   assert.equal(config.provider, "OpenAI-Compatible");
   assert.equal(config.apiKey, "secret-value");
   assert.equal(config.model, "deepseek-chat");
@@ -50,37 +50,33 @@ test("normalizes DualSubs AI settings and keeps secrets opaque", () => {
   assert.equal(config.originalFetchTimeoutMs, 1400);
 });
 
-test("prepares an Official DualSubs baseline without changing subtitle format", () => {
-  const config = Core.normalizeConfig({
-    api_key: "",
-    target_language: "zh-Hans"
-  });
-  const input =
-    "https://www.youtube.com/api/timedtext?v=abc&lang=en&tlang=zh-Hant&format=srv3";
-  const prepared = Core.prepareDualSubsRequest(input, config);
-  const url = new URL(prepared.url);
-  assert.equal(prepared.changed, true);
-  assert.equal(prepared.reason, "official-baseline");
-  assert.equal(url.searchParams.get("tlang"), "zh-Hant");
-  assert.equal(url.searchParams.get("subtype"), "Official");
-  assert.equal(url.searchParams.get("dsai"), "1");
-  assert.equal(url.searchParams.get("format"), "srv3");
-  assert.equal(url.searchParams.has("fmt"), false);
-});
-
-test("automatically adds the configured target but respects manual-only mode", () => {
-  const automatic = Core.prepareDualSubsRequest(
-    "https://www.youtube.com/api/timedtext?v=abc&lang=en&fmt=json3",
-    Core.normalizeConfig({ target_language: "zh-Hans" })
+test("rewrites timedtext to the source track and never keeps tlang", () => {
+  const config = Core.normalizeConfig({ api_key: "k", model: "m", target_language: "zh-Hans" });
+  const explicit = Core.rewriteTimedTextRequest(
+    "https://www.youtube.com/api/timedtext?v=abc&lang=en&tlang=zh-Hant&format=srv3",
+    config
   );
-  assert.equal(new URL(automatic.url).searchParams.get("tlang"), "zh-Hans");
+  const url = new URL(explicit.url);
+  assert.equal(explicit.changed, true);
+  assert.equal(url.searchParams.has("tlang"), false);
+  assert.equal(url.searchParams.get("dsai"), "1");
+  assert.equal(url.searchParams.get("dsai_target"), "zh-Hant");
+  assert.equal(url.searchParams.get("format"), "srv3");
+  assert.deepEqual(Core.responseLanguages(explicit.url, config), { source: "en", target: "zh-Hant" });
 
-  const manual = Core.prepareDualSubsRequest(
+  const manual = Core.rewriteTimedTextRequest(
     "https://www.youtube.com/api/timedtext?v=abc&lang=en&fmt=json3",
-    Core.normalizeConfig({ auto_translate: false })
+    Core.normalizeConfig({ api_key: "k", model: "m", auto_translate: false })
   );
   assert.equal(manual.changed, false);
   assert.equal(manual.reason, "manual-only");
+
+  const unconfigured = Core.rewriteTimedTextRequest(
+    "https://www.youtube.com/api/timedtext?v=abc&lang=en&tlang=zh-Hans",
+    Core.normalizeConfig({ api_key: "" })
+  );
+  assert.equal(new URL(unconfigured.url).searchParams.has("tlang"), false);
+  assert.equal(unconfigured.reason, "missing-config");
 });
 
 test("builds the original subtitle URL without recursive interception markers", () => {

@@ -5,9 +5,10 @@
 })(typeof globalThis === "object" ? globalThis : this, function createYouTubeAICore() {
   "use strict";
 
-  const VERSION = "0.4.0";
+  const VERSION = "0.4.1";
   const QUERY_FLAG = "dsai";
-  const QUERY_TARGET = "tlang";
+  // 不能用 "tlang"：2026-10 起 YouTube 对带 tlang 的 timedtext 请求一律返回 429。
+  const QUERY_TARGET = "dsai_target";
   const CACHE_VERSION = "v4";
 
   const DEFAULTS = Object.freeze({
@@ -211,6 +212,12 @@
     result.reason = "disabled";
     if (!isConfigured(config)) {
       result.reason = "missing-config";
+      // 没配置 AI 时也去掉 tlang，至少让原文字幕能正常加载。
+      if (url.searchParams.has("tlang")) {
+        url.searchParams.delete("tlang");
+        result.changed = true;
+        result.url = url.toString();
+      }
       return result;
     }
 
@@ -862,7 +869,7 @@
       version: CACHE_VERSION,
       video: url.searchParams.get("v") || "",
       source: url.searchParams.get("lang") || "",
-      target: url.searchParams.get("tlang") || config.targetLanguage,
+      target: url.searchParams.get(QUERY_TARGET) || config.targetLanguage,
       kind: url.searchParams.get("kind") || "",
       format: url.searchParams.get("fmt") || url.searchParams.get("format") || "",
       provider: config.provider,

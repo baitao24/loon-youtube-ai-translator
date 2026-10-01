@@ -1,4 +1,4 @@
-// DualSubs AI bilingual subtitles for Loon v0.4.0
+// DualSubs AI bilingual subtitles for Loon v0.4.1
 // DualSubs YouTube v1.5.11 compatibility layer + Gemini/OpenAI-Compatible enhancement
 // Official YouTube translation remains the safe fallback.
 // Never logs API keys or full subtitle payloads.
@@ -9,9 +9,10 @@
 })(typeof globalThis === "object" ? globalThis : this, function createYouTubeAICore() {
   "use strict";
 
-  const VERSION = "0.4.0";
+  const VERSION = "0.4.1";
   const QUERY_FLAG = "dsai";
-  const QUERY_TARGET = "tlang";
+  // 不能用 "tlang"：2026-10 起 YouTube 对带 tlang 的 timedtext 请求一律返回 429。
+  const QUERY_TARGET = "dsai_target";
   const CACHE_VERSION = "v4";
 
   const DEFAULTS = Object.freeze({
@@ -215,6 +216,12 @@
     result.reason = "disabled";
     if (!isConfigured(config)) {
       result.reason = "missing-config";
+      // 没配置 AI 时也去掉 tlang，至少让原文字幕能正常加载。
+      if (url.searchParams.has("tlang")) {
+        url.searchParams.delete("tlang");
+        result.changed = true;
+        result.url = url.toString();
+      }
       return result;
     }
 
@@ -866,7 +873,7 @@
       version: CACHE_VERSION,
       video: url.searchParams.get("v") || "",
       source: url.searchParams.get("lang") || "",
-      target: url.searchParams.get("tlang") || config.targetLanguage,
+      target: url.searchParams.get(QUERY_TARGET) || config.targetLanguage,
       kind: url.searchParams.get("kind") || "",
       format: url.searchParams.get("fmt") || url.searchParams.get("format") || "",
       provider: config.provider,
@@ -938,6 +945,7 @@
   const config = Core.normalizeConfig(
     typeof $argument === "undefined" ? {} : $argument
   );
+  const scriptStartedAt = Date.now();
   const executionDeadline =
     Date.now() + Math.min(config.maxWaitMs, CLIENT_SAFE_MAX_WAIT_MS);
 
@@ -1032,39 +1040,6 @@
     return executionDeadline - Date.now();
   }
 
-  function httpGet(request, timeoutMs) {
-    return new Promise((resolve, reject) => {
-      if (typeof $httpClient === "undefined" || typeof $httpClient.get !== "function") {
-        reject(new Error("Loon $httpClient.get is unavailable"));
-        return;
-      }
-      let settled = false;
-      const timer = setTimeout(() => {
-        if (settled) return;
-        settled = true;
-        reject(new Error(`Original subtitle timeout after ${timeoutMs}ms`));
-      }, timeoutMs);
-      $httpClient.get(request, (error, response, body) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        if (error) {
-          reject(new Error(String(error)));
-          return;
-        }
-        const status = Number(response?.status || response?.statusCode || 0);
-        if (status < 200 || status >= 300) {
-          reject(new Error(`Original subtitle HTTP ${status || "unknown"}`));
-          return;
-        }
-        resolve({
-          body: String(body || ""),
-          headers: response?.headers || {}
-        });
-      });
-    });
-  }
-
   function httpPost(request) {
     return new Promise((resolve, reject) => {
       if (typeof $httpClient === "undefined" || typeof $httpClient.post !== "function") {
@@ -1151,26 +1126,6 @@
       }
     }
     throw lastError || new Error("AI translation failed");
-  }
-
-  async function mapLimit(items, limit, worker) {
-    const results = new Array(items.length);
-    let nextIndex = 0;
-    async function runWorker() {
-      while (nextIndex < items.length) {
-        const index = nextIndex;
-        nextIndex += 1;
-        results[index] = await worker(items[index], index);
-      }
-    }
-    const workerCount = Math.min(
-      Math.max(1, limit),
-      Math.max(1, items.length)
-    );
-    await Promise.all(
-      Array.from({ length: workerCount }, () => runWorker())
-    );
-    return results;
   }
 
   // 在截止时间前尽量多翻：按时间顺序派发批次，到点就带着已完成的行返回，
@@ -1294,41 +1249,41 @@
     }
   }
 
-  function requestHeadersForOriginal() {
-    const headers = Object.assign({}, $request.headers || {});
-    Object.keys(headers).forEach((key) => {
-      if (/^(content-length|accept-encoding|host)$/i.test(key)) delete headers[key];
-    });
-    return headers;
+  function subtitleContentType(document) {
+    return document.format === "srv3"
+      ? "application/xml; charset=utf-8"
+      : "application/json; charset=utf-8";
   }
 
   async function handleRequest() {
-    const prepared = Core.prepareDualSubsRequest($request.url, config);
-    if (prepared.changed) {
+    const rewritten = Core.rewriteTimedTextRequest($request.url, config);
+    if (rewritten.changed) {
       log(
         "INFO",
-        `Official bilingual baseline prepared (${prepared.sourceLanguage} -> ${prepared.targetLanguage})`
+        `Requesting source subtitles (${rewritten.sourceLanguage} -> ${rewritten.targetLanguage}, ${rewritten.reason})`
       );
     }
-    doneRequest(prepared.url);
+    doneRequest(rewritten.url);
   }
 
+  // 0.4.1 起直接翻原文字幕：YouTube 对带 tlang 的官方机翻请求返回 429，
+  // 不能再用它做底座。没翻到的行暂时只显示原文。
   async function handleResponse() {
-    if (!Core.isDualSubsResponse($request.url)) {
+    if (!Core.shouldProcessResponse($request.url)) {
       donePassthrough("skipped");
       return;
     }
+    const status = Number($response?.status || $response?.statusCode || 200);
+    if (status < 200 || status >= 300) {
+      log("WARN", `Subtitle HTTP ${status}; passing through`);
+      donePassthrough("upstream-error");
+      return;
+    }
 
-    const translatedBody = String($response.body || "");
-    const translatedContentType =
-      $response.headers?.["Content-Type"] ||
-      $response.headers?.["content-type"] ||
-      "";
-    const responseCacheKey = Core.makeResponseCacheKey(
-      $request.url,
-      translatedBody,
-      config
-    );
+    const sourceBody = String($response.body || "");
+    const sourceContentType =
+      $response.headers?.["Content-Type"] || $response.headers?.["content-type"] || "";
+    const responseCacheKey = Core.makeResponseCacheKey($request.url, sourceBody, config);
     const cached = readCache(responseCacheKey);
     if (cached) {
       log("INFO", `Final subtitle cache hit (${cached.result})`);
@@ -1336,64 +1291,21 @@
       return;
     }
 
-    const originalUrl = Core.originalSubtitleUrl($request.url);
-    const originalTimeout = Math.min(
-      config.originalFetchTimeoutMs,
-      Math.max(500, remainingTime() - 900)
-    );
-    let original;
+    let sourceDocument;
     try {
-      original = await httpGet(
-        { url: originalUrl, headers: requestHeadersForOriginal() },
-        originalTimeout
-      );
+      sourceDocument = Core.parseSubtitleDocument(sourceBody, sourceContentType);
     } catch (error) {
       log("ERROR", safeError(error));
-      donePassthrough("official-only", error);
+      donePassthrough("source-only", error);
       return;
     }
-
-    const originalContentType =
-      original.headers?.["Content-Type"] ||
-      original.headers?.["content-type"] ||
-      translatedContentType;
-    let official;
-    try {
-      official = Core.composeOfficialSubtitles(
-        original.body,
-        originalContentType,
-        translatedBody,
-        translatedContentType,
-        config
-      );
-      log(
-        "INFO",
-        `Official bilingual baseline ready (${official.matchedCues}/${official.sourceCues.length})`
-      );
-    } catch (error) {
-      log("ERROR", safeError(error));
-      donePassthrough("official-only", error);
+    if (!config.aiEnabled || !Core.isConfigured(config) || !sourceDocument.cues.length) {
+      donePassthrough("source-only");
       return;
     }
-
-    if (!config.aiEnabled || !Core.isConfigured(config)) {
-      const reason = config.aiEnabled ? "AI configuration is incomplete" : "AI disabled";
-      log("INFO", `${reason}; using official bilingual subtitles`);
-      writeCache(
-        responseCacheKey,
-        {
-          body: official.body,
-          contentType: official.contentType,
-          result: "official"
-        },
-        3600000
-      );
-      doneBody(official.body, official.contentType, "official");
-      return;
-    }
+    const contentType = subtitleContentType(sourceDocument);
 
     try {
-      const sourceDocument = official.sourceDocument;
       const languages = Core.responseLanguages($request.url, config);
       const rowsKey = Core.makeCacheKey($request.url, config, sourceDocument.cues, languages);
       const known = readRows(rowsKey);
@@ -1416,54 +1328,28 @@
         throw outcome.failures[0] || new Error("AI produced no rows before the subtitle deadline");
       }
       const complete = aiRows.length === sourceDocument.cues.length;
-      const aiBody = Core.renderSubtitleDocument(
-        sourceDocument,
-        Core.mergeTranslationRows(official.translations, aiRows),
-        config
-      );
+      const aiBody = Core.renderSubtitleDocument(sourceDocument, aiRows, config);
       const percent = Math.floor((aiRows.length / sourceDocument.cues.length) * 100);
       log(
         "INFO",
         `AI rows ${aiRows.length}/${sourceDocument.cues.length} (${percent}%), ` +
           `new ${outcome.rows.length}, failed batches ${outcome.failures.length}, ` +
-          `${Date.now() - (executionDeadline - Math.min(config.maxWaitMs, CLIENT_SAFE_MAX_WAIT_MS))}ms`
+          `${Date.now() - scriptStartedAt}ms`
       );
       if (complete) {
-        writeCache(
-          responseCacheKey,
-          {
-            body: aiBody,
-            contentType: official.contentType,
-            result: "ai"
-          },
-          86400000
-        );
+        writeCache(responseCacheKey, { body: aiBody, contentType, result: "ai" }, 86400000);
       } else {
         notifyFallback(
-          `已用 AI 翻译 ${percent}%，其余为官方译文。关闭再打开字幕会继续翻译剩下的部分。`,
+          `已用 AI 翻译 ${percent}%，其余暂时只显示原文。关闭再打开字幕会继续翻译剩下的部分。`,
           "AI 字幕部分完成"
         );
       }
-      doneBody(aiBody, official.contentType, complete ? "ai" : "ai-partial");
+      doneBody(aiBody, contentType, complete ? "ai" : "ai-partial");
     } catch (error) {
       const message = safeError(error);
-      log("WARN", `${message}; using official bilingual subtitles`);
-      notifyFallback(message);
-      writeCache(
-        responseCacheKey,
-        {
-          body: official.body,
-          contentType: official.contentType,
-          result: "official-fallback"
-        },
-        30000
-      );
-      doneBody(
-        official.body,
-        official.contentType,
-        "official-fallback",
-        message
-      );
+      log("WARN", `${message}; showing source subtitles`);
+      notifyFallback(message, "AI 翻译失败，本次只显示原文字幕");
+      donePassthrough("source-only", message);
     }
   }
 
@@ -1475,6 +1361,6 @@
       const message = safeError(error);
       log("ERROR", message);
       if (typeof $response === "undefined") doneRequest($request.url);
-      else donePassthrough("official-only", message);
+      else donePassthrough("source-only", message);
     });
 })();

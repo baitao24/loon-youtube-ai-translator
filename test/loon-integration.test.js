@@ -88,15 +88,6 @@ function sourceJson3() {
   });
 }
 
-function officialJson3() {
-  return JSON.stringify({
-    events: [
-      { tStartMs: 10, dDurationMs: 20, segs: [{ utf8: "官方你好" }] },
-      { tStartMs: 30, dDurationMs: 40, segs: [{ utf8: "官方世界" }] }
-    ]
-  });
-}
-
 function sourceSrv3() {
   return (
     '<?xml version="1.0"?><timedtext format="3"><body>' +
@@ -105,18 +96,11 @@ function sourceSrv3() {
   );
 }
 
-function officialSrv3() {
+// 请求脚本改写后的地址：没有 tlang，带 dsai 标记和目标语言
+function processedUrl(format = "json3", video = "abc") {
   return (
-    '<?xml version="1.0"?><timedtext format="3"><body>' +
-    '<p t="10" d="20"><s>官方你好</s></p><p t="30" d="40"><s>官方世界</s></p>' +
-    "</body></timedtext>"
-  );
-}
-
-function officialUrl(format = "json3", video = "abc") {
-  return (
-    `https://www.youtube.com/api/timedtext?v=${video}&lang=en&tlang=zh-Hans` +
-    `&fmt=${format}&subtype=Official&dsai=1`
+    `https://www.youtube.com/api/timedtext?v=${video}&lang=en` +
+    `&fmt=${format}&dsai=1&dsai_target=zh-Hans`
   );
 }
 
@@ -136,51 +120,63 @@ function successfulGemini(callback) {
   );
 }
 
-test("request keeps tlang and srv3 while adding the Official baseline", async () => {
-  const input =
-    "https://www.youtube.com/api/timedtext?v=abc&lang=en&tlang=zh-Hant&format=srv3";
-  const result = await runLoon({
+function noGet() {
+  assert.fail("0.4.1 不应再额外请求字幕");
+}
+
+test("request strips tlang because YouTube now answers it with 429", async () => {
+  const withTarget = await runLoon({
     argument: config(),
-    request: { url: input, method: "GET", headers: { Accept: "*/*" } }
+    request: {
+      url: "https://www.youtube.com/api/timedtext?v=abc&lang=en&tlang=zh-Hant&format=srv3",
+      method: "GET",
+      headers: {}
+    }
   });
-  const url = new URL(result.doneValue.url);
-  assert.equal(url.searchParams.get("tlang"), "zh-Hant");
-  assert.equal(url.searchParams.get("subtype"), "Official");
-  assert.equal(url.searchParams.get("dsai"), "1");
-  assert.equal(url.searchParams.get("format"), "srv3");
-  assert.equal(url.searchParams.has("fmt"), false);
+  const rewritten = new URL(withTarget.doneValue.url);
+  assert.equal(rewritten.searchParams.has("tlang"), false);
+  assert.equal(rewritten.searchParams.get("dsai"), "1");
+  assert.equal(rewritten.searchParams.get("dsai_target"), "zh-Hant");
+  assert.equal(rewritten.searchParams.get("format"), "srv3");
+
+  const automatic = await runLoon({
+    argument: config(),
+    request: { url: "https://www.youtube.com/api/timedtext?v=abc&lang=en&fmt=json3", method: "GET", headers: {} }
+  });
+  const automaticUrl = new URL(automatic.doneValue.url);
+  assert.equal(automaticUrl.searchParams.has("tlang"), false);
+  assert.equal(automaticUrl.searchParams.get("dsai_target"), "zh-Hans");
+
+  const unconfigured = await runLoon({
+    argument: { ...config(), api_key: "" },
+    request: { url: "https://www.youtube.com/api/timedtext?v=abc&lang=en&tlang=zh-Hans", method: "GET", headers: {} }
+  });
+  const plainUrl = new URL(unconfigured.doneValue.url);
+  assert.equal(plainUrl.searchParams.has("tlang"), false, "没配置 AI 也要去掉 tlang");
+  assert.equal(plainUrl.searchParams.has("dsai"), false);
 });
 
-test("Gemini success replaces official translation with AI bilingual JSON3", async () => {
-  let getRequest;
+test("Gemini translates the source JSON3 response directly into AI bilingual subtitles", async () => {
   let apiRequest;
   const result = await runLoon({
     argument: config(),
-    request: { url: officialUrl(), method: "GET", headers: { Cookie: "session" } },
+    request: { url: processedUrl(), method: "GET", headers: { Cookie: "session" } },
     response: {
       status: 200,
       headers: { "Content-Type": "application/json", "Content-Length": "123" },
-      body: officialJson3()
+      body: sourceJson3()
     },
     httpClient: {
-      get(request, callback) {
-        getRequest = request;
-        callback(
-          null,
-          { status: 200, headers: { "Content-Type": "application/json" } },
-          sourceJson3()
-        );
-      },
+      get: noGet,
       post(request, callback) {
         apiRequest = request;
         successfulGemini(callback);
       }
     }
   });
-  assert.equal(new URL(getRequest.url).searchParams.has("tlang"), false);
-  assert.equal(getRequest.headers.Cookie, "session");
   assert.equal(apiRequest.headers["x-goog-api-key"], "test-secret");
   assert.equal(apiRequest.body.includes("test-secret"), false);
+  assert.match(apiRequest.body, /zh-Hans/);
   const output = JSON.parse(result.doneValue.body);
   assert.equal(output.events[0].segs[0].utf8, "AI你好\nHello");
   assert.equal(output.events[1].segs[0].utf8, "AI世界\nWorld");
@@ -191,150 +187,84 @@ test("Gemini success replaces official translation with AI bilingual JSON3", asy
 test("Gemini success preserves srv3 and paragraph timing", async () => {
   const result = await runLoon({
     argument: config(),
-    request: { url: officialUrl("srv3"), method: "GET", headers: {} },
+    request: { url: processedUrl("srv3"), method: "GET", headers: {} },
     response: {
       status: 200,
       headers: { "content-type": "text/xml", "content-encoding": "gzip" },
-      body: officialSrv3()
+      body: sourceSrv3()
     },
-    httpClient: {
-      get(_request, callback) {
-        callback(
-          null,
-          { status: 200, headers: { "content-type": "text/xml" } },
-          sourceSrv3()
-        );
-      },
-      post(_request, callback) {
-        successfulGemini(callback);
-      }
-    }
+    httpClient: { get: noGet, post: (_request, callback) => successfulGemini(callback) }
   });
   assert.match(result.doneValue.body, /<p t="10" d="20"><s>AI你好&#10;Hello<\/s><\/p>/);
   assert.match(result.doneValue.body, /<p t="30" d="40"><s>AI世界&#10;World<\/s><\/p>/);
-  assert.equal(
-    result.doneValue.headers["content-type"],
-    "application/xml; charset=utf-8"
-  );
+  assert.equal(result.doneValue.headers["content-type"], "application/xml; charset=utf-8");
   assert.equal(result.doneValue.headers["content-encoding"], "identity");
 });
 
-test("missing API configuration still returns official bilingual subtitles", async () => {
-  let postCalls = 0;
+test("missing API configuration passes the source subtitles through", async () => {
+  const body = sourceJson3();
   const result = await runLoon({
     argument: { ...config(), api_key: "" },
-    request: { url: officialUrl(), method: "GET", headers: {} },
-    response: {
-      status: 200,
-      headers: { "Content-Type": "application/json" },
-      body: officialJson3()
-    },
-    httpClient: {
-      get(_request, callback) {
-        callback(
-          null,
-          { status: 200, headers: { "Content-Type": "application/json" } },
-          sourceJson3()
-        );
-      },
-      post() {
-        postCalls += 1;
-      }
-    }
+    request: { url: processedUrl(), method: "GET", headers: {} },
+    response: { status: 200, headers: { "Content-Type": "application/json" }, body },
+    httpClient: { get: noGet, post: () => assert.fail("不应调用 AI") }
   });
-  const output = JSON.parse(result.doneValue.body);
-  assert.equal(postCalls, 0);
-  assert.equal(output.events[0].segs[0].utf8, "官方你好\nHello");
-  assert.equal(result.doneValue.headers["x-dualsubs-ai-result"], "official");
+  assert.equal(result.doneValue.body, body);
+  assert.equal(result.doneValue.headers["x-dualsubs-ai-result"], "source-only");
 });
 
-test("AI failure falls back to official bilingual subtitles, never blank", async () => {
+test("AI failure keeps the source subtitles, never an error", async () => {
   let notificationCount = 0;
+  const body = sourceJson3();
   const result = await runLoon({
     argument: config(),
-    request: { url: officialUrl(), method: "GET", headers: {} },
-    response: {
-      status: 200,
-      headers: { "Content-Type": "application/json", ETag: "official" },
-      body: officialJson3()
-    },
+    request: { url: processedUrl(), method: "GET", headers: {} },
+    response: { status: 200, headers: { "Content-Type": "application/json", ETag: "src" }, body },
     httpClient: {
-      get(_request, callback) {
-        callback(
-          null,
-          { status: 200, headers: { "Content-Type": "application/json" } },
-          sourceJson3()
-        );
-      },
+      get: noGet,
       post(_request, callback) {
         callback(null, { status: 500 }, "{\"error\":\"bad\"}");
       }
     },
-    notification: {
-      post() {
-        notificationCount += 1;
-      }
-    }
+    notification: { post: () => (notificationCount += 1) }
   });
-  const output = JSON.parse(result.doneValue.body);
-  assert.equal(output.events[0].segs[0].utf8, "官方你好\nHello");
-  assert.equal(output.events[1].segs[0].utf8, "官方世界\nWorld");
-  assert.equal(result.doneValue.headers.ETag, "official");
-  assert.equal(
-    result.doneValue.headers["x-dualsubs-ai-result"],
-    "official-fallback"
-  );
-  assert.match(
-    decodeURIComponent(result.doneValue.headers["x-dualsubs-ai-error"]),
-    /AI HTTP 500/
-  );
+  assert.equal(result.doneValue.body, body);
+  assert.equal(result.doneValue.headers.ETag, "src");
+  assert.equal(result.doneValue.headers["x-dualsubs-ai-result"], "source-only");
+  assert.match(decodeURIComponent(result.doneValue.headers["x-dualsubs-ai-error"]), /AI HTTP 500/);
   assert.equal(notificationCount, 1);
 });
 
-test("original subtitle failure preserves YouTube official translated response", async () => {
-  const originalOfficial = officialJson3();
+test("YouTube error pages pass through untouched without calling AI", async () => {
+  const sorry = "<html><head><title>Sorry...</title></head><body>429</body></html>";
   const result = await runLoon({
     argument: config(),
-    request: { url: officialUrl(), method: "GET", headers: {} },
-    response: {
-      status: 200,
-      headers: { "Content-Type": "application/json" },
-      body: originalOfficial
-    },
-    httpClient: {
-      get(_request, callback) {
-        callback(null, { status: 503 }, "");
-      },
-      post() {
-        assert.fail("AI must not run without source subtitles");
-      }
-    }
+    request: { url: processedUrl("srv3"), method: "GET", headers: {} },
+    response: { status: 429, headers: { "Content-Type": "text/html" }, body: sorry },
+    httpClient: { get: noGet, post: () => assert.fail("不应调用 AI") }
   });
-  assert.equal(result.doneValue.body, originalOfficial);
-  assert.equal(result.doneValue.headers["x-dualsubs-ai-result"], "official-only");
+  assert.equal(result.doneValue.body, sorry, "原样放行，不改写");
+  assert.equal(result.doneValue.headers["x-dualsubs-ai-result"], "upstream-error");
+});
+
+test("responses without the dsai marker are left alone", async () => {
+  const result = await runLoon({
+    argument: config(),
+    request: { url: "https://www.youtube.com/api/timedtext?v=abc&lang=en&fmt=json3", method: "GET", headers: {} },
+    response: { status: 200, headers: { "Content-Type": "application/json" }, body: sourceJson3() },
+    httpClient: { get: noGet, post: () => assert.fail("不应调用 AI") }
+  });
+  assert.equal(result.doneValue.headers["x-dualsubs-ai-result"], "skipped");
 });
 
 test("OpenAI-compatible adapter retries once without JSON mode", async () => {
   const bodies = [];
   const result = await runLoon({
-    argument: {
-      ...config("OpenAI-Compatible"),
-      base_url: "https://example.com/v1"
-    },
-    request: { url: officialUrl(), method: "GET", headers: {} },
-    response: {
-      status: 200,
-      headers: { "Content-Type": "application/json" },
-      body: officialJson3()
-    },
+    argument: { ...config("OpenAI-Compatible"), base_url: "https://example.com/v1" },
+    request: { url: processedUrl(), method: "GET", headers: {} },
+    response: { status: 200, headers: { "Content-Type": "application/json" }, body: sourceJson3() },
     httpClient: {
-      get(_request, callback) {
-        callback(
-          null,
-          { status: 200, headers: { "Content-Type": "application/json" } },
-          sourceJson3()
-        );
-      },
+      get: noGet,
       post(request, callback) {
         bodies.push(JSON.parse(request.body));
         if (bodies.length === 1) {
@@ -365,34 +295,19 @@ test("OpenAI-compatible adapter retries once without JSON mode", async () => {
   assert.equal(bodies.length, 2);
   assert.deepEqual(bodies[0].response_format, { type: "json_object" });
   assert.equal(bodies[1].response_format, undefined);
-  assert.equal(
-    JSON.parse(result.doneValue.body).events[0].segs[0].utf8,
-    "AI你好\nHello"
-  );
+  assert.equal(JSON.parse(result.doneValue.body).events[0].segs[0].utf8, "AI你好\nHello");
 });
 
 test("second identical response uses final cache without network calls", async () => {
   const store = new Map();
-  let getCalls = 0;
   let postCalls = 0;
   const shared = {
     argument: config(),
-    request: { url: officialUrl("json3", "cache"), method: "GET", headers: {} },
-    response: {
-      status: 200,
-      headers: { "Content-Type": "application/json" },
-      body: officialJson3()
-    },
+    request: { url: processedUrl("json3", "cache"), method: "GET", headers: {} },
+    response: { status: 200, headers: { "Content-Type": "application/json" }, body: sourceJson3() },
     store,
     httpClient: {
-      get(_request, callback) {
-        getCalls += 1;
-        callback(
-          null,
-          { status: 200, headers: { "Content-Type": "application/json" } },
-          sourceJson3()
-        );
-      },
+      get: noGet,
       post(_request, callback) {
         postCalls += 1;
         successfulGemini(callback);
@@ -401,18 +316,14 @@ test("second identical response uses final cache without network calls", async (
   };
   await runLoon(shared);
   const second = await runLoon(shared);
-  assert.equal(getCalls, 1);
   assert.equal(postCalls, 1);
-  assert.equal(
-    JSON.parse(second.doneValue.body).events[1].segs[0].utf8,
-    "AI世界\nWorld"
-  );
+  assert.equal(JSON.parse(second.doneValue.body).events[1].segs[0].utf8, "AI世界\nWorld");
   assert.equal(second.doneValue.headers["x-dualsubs-ai-result"], "cache-ai");
 });
 
 function tenCueJson3(prefix) {
   return JSON.stringify({
-    events: Array.from({ length: 10 }, (_, index) => index).map((index) => ({
+    events: Array.from({ length: 10 }, (_, index) => ({
       tStartMs: index * 1000 + 10,
       dDurationMs: 900,
       segs: [{ utf8: `${prefix}${index}` }]
@@ -426,47 +337,45 @@ function geminiRows(rows) {
   });
 }
 
+function requestedIds(request) {
+  return JSON.parse(JSON.parse(request.body).contents[0].parts[0].text).subtitles.map((row) => row.id);
+}
+
 function partialRun({ store, onPost, notification }) {
   return runLoon({
     argument: {
       ...config(),
-      concurrency: "2",
-      max_batch_items: "5",
+      parallel: "2",
+      batch_size: "5",
       max_wait_ms: "3000",
       timeout_ms: "3000"
     },
-    request: { url: officialUrl("json3", "longvid"), method: "GET", headers: {} },
-    response: {
-      status: 200,
-      headers: { "Content-Type": "application/json" },
-      body: tenCueJson3("官方")
-    },
-    httpClient: {
-      get(_request, callback) {
-        callback(null, { status: 200, headers: { "Content-Type": "application/json" } }, tenCueJson3("Line "));
-      },
-      post: onPost
-    },
+    request: { url: processedUrl("json3", "longvid"), method: "GET", headers: {} },
+    response: { status: 200, headers: { "Content-Type": "application/json" }, body: tenCueJson3("Line ") },
+    httpClient: { get: noGet, post: onPost },
     notification,
     store,
     doneTimeoutMs: 4500
   });
 }
 
-test("deadline returns finished AI rows and fills the rest with official text, then resumes", async () => {
+test("deadline returns finished AI rows, leaves the rest as source text, then resumes", async () => {
   const store = new Map();
   let notifications = 0;
   const first = await partialRun({
     store,
     notification: { post: () => (notifications += 1) },
     onPost(request, callback) {
-      const ids = JSON.parse(JSON.parse(request.body).contents[0].parts[0].text).subtitles.map((row) => row.id);
+      const ids = requestedIds(request);
       // 第一批正常返回，第二批一直不返回（模拟慢请求）
       if (ids[0] === 0) callback(null, { status: 200 }, geminiRows(ids.map((id) => ({ id, text: `AI${id}` }))));
     }
   });
   const firstEvents = JSON.parse(first.doneValue.body).events.map((event) => event.segs[0].utf8);
-  assert.deepEqual(firstEvents, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9].map((i) => (i < 5 ? `AI${i}\nLine ${i}` : `官方${i}\nLine ${i}`)));
+  assert.deepEqual(
+    firstEvents,
+    Array.from({ length: 10 }, (_, i) => (i < 5 ? `AI${i}\nLine ${i}` : `Line ${i}`))
+  );
   assert.equal(first.doneValue.headers["x-dualsubs-ai-result"], "ai-partial");
   assert.equal(notifications, 1);
 
@@ -474,7 +383,7 @@ test("deadline returns finished AI rows and fills the rest with official text, t
   const second = await partialRun({
     store,
     onPost(request, callback) {
-      const ids = JSON.parse(JSON.parse(request.body).contents[0].parts[0].text).subtitles.map((row) => row.id);
+      const ids = requestedIds(request);
       requested.push(...ids);
       callback(null, { status: 200 }, geminiRows(ids.map((id) => ({ id, text: `AI${id}` }))));
     }
@@ -485,16 +394,15 @@ test("deadline returns finished AI rows and fills the rest with official text, t
   assert.equal(second.doneValue.headers["x-dualsubs-ai-result"], "ai");
 });
 
-test("a batch that drops one line keeps the other AI rows instead of falling back entirely", async () => {
-  const store = new Map();
+test("a batch that drops one line keeps the other AI rows", async () => {
   const result = await partialRun({
-    store,
+    store: new Map(),
     onPost(request, callback) {
-      const ids = JSON.parse(JSON.parse(request.body).contents[0].parts[0].text).subtitles.map((row) => row.id);
+      const ids = requestedIds(request);
       callback(null, { status: 200 }, geminiRows(ids.filter((id) => id !== 3).map((id) => ({ id, text: `AI${id}` }))));
     }
   });
   const events = JSON.parse(result.doneValue.body).events.map((event) => event.segs[0].utf8);
-  assert.deepEqual(events, Array.from({ length: 10 }, (_, i) => (i === 3 ? `官方3\nLine 3` : `AI${i}\nLine ${i}`)));
+  assert.deepEqual(events, Array.from({ length: 10 }, (_, i) => (i === 3 ? "Line 3" : `AI${i}\nLine ${i}`)));
   assert.equal(result.doneValue.headers["x-dualsubs-ai-result"], "ai-partial");
 });

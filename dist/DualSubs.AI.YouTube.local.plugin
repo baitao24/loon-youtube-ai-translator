@@ -6,7 +6,7 @@
 #!system = iOS,iPadOS,macOS
 #!system_version = 15
 #!loon_version = 3.4.0(962)
-#!version = 0.4.0
+#!version = 0.4.1
 
 [Argument]
 Type = select,"Official",tag=DualSubs 字幕模式,desc=AI 增强必须使用 Official；先取得 YouTube 官方译文作为安全兜底
