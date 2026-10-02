@@ -976,3 +976,67 @@ test("background translation only reports completion after the rows are really s
   assert.ok(lines.some((line) => /Background progress for unsaved: 5\/10 saved/.test(line)));
   assert.ok(JSON.parse(store.get("@DualSubs-AI.BackgroundJobs.v1")).unsaved, "任务保留，下次统计请求再试");
 });
+
+test("background translation waits 30 seconds after a subtitle load", async () => {
+  const store = new Map();
+  await slowFirstOpen(store, [], "cooldown");
+  // 请求阶段（打开视频）会记下字幕加载时间
+  await runLoon({
+    argument: config(),
+    request: { url: "https://www.youtube.com/api/timedtext?v=cooldown&lang=en&fmt=json3", method: "GET", headers: {} },
+    store
+  });
+  const lines = [];
+  await runLoon({
+    argument: { ...config(), LogLevel: "INFO" },
+    request: { url: pingUrl("cooldown"), method: "POST", headers: {} },
+    store,
+    console: { log: (line) => lines.push(line) },
+    httpClient: { get: noGet, post: () => assert.fail("刚加载字幕时后台不应启动") }
+  });
+  assert.ok(lines.some((line) => /background translation waits/.test(line)), lines.join("\n"));
+  assert.equal(JSON.parse(store.get("@DualSubs-AI.BackgroundJobs.v1")).cooldown.remaining, 5);
+});
+
+test("background translation uses at most 3 requests at a time and yields to a new subtitle load", async () => {
+  const store = new Map();
+  // 准备一个还剩 20 句的后台任务（每批最少 5 句，共 4 批）
+  store.set(
+    "@DualSubs-AI.BackgroundJobs.v1",
+    JSON.stringify({
+      polite: {
+        key: "polite-key",
+        languages: { source: "en", target: "zh-Hans" },
+        cues: Array.from({ length: 20 }, (_, id) => ({ id, text: `Line ${id}` })),
+        remaining: 20,
+        createdAt: Date.now()
+      }
+    })
+  );
+  let inFlight = 0;
+  let maxInFlight = 0;
+  let calls = 0;
+  await runLoon({
+    argument: { ...config(), batch_size: "5" },
+    request: { url: pingUrl("polite"), method: "POST", headers: {} },
+    store,
+    httpClient: {
+      get: noGet,
+      post(request, callback) {
+        calls += 1;
+        inFlight += 1;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        // 前 3 个请求并发发出后，用户切到了别的视频
+        if (calls === 3) store.set("@DualSubs-AI.LastSubtitleLoad.v1", String(Date.now() + 50));
+        const ids = requestedIds(request);
+        setTimeout(() => {
+          inFlight -= 1;
+          callback(null, { status: 200 }, geminiRows(ids.map((id) => ({ id, text: `AI${id}` }))));
+        }, 200);
+      }
+    }
+  });
+  assert.equal(maxInFlight, 3, "后台最多 3 个并发");
+  assert.equal(calls, 3, "检测到新的字幕加载后不再发第 4 批");
+  assert.equal(JSON.parse(store.get("@DualSubs-AI.BackgroundJobs.v1")).polite.remaining, 5);
+});

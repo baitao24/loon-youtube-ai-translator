@@ -35,6 +35,11 @@
     /^https?:\/\/s\.youtube\.com\/api\/stats\//.test(String((typeof $request === "undefined" ? null : $request)?.url || ""));
   const BACKGROUND_BUDGET_MS = 20000;
   const BACKGROUND_REQUEST_TIMEOUT_MS = 15000;
+  // 后台续翻要给视频加载和去广告插件让路：只用 3 个并发；打开/切换视频后 30 秒内不启动；
+  // 后台进行中一旦有新的字幕加载，就不再发新批次
+  const BACKGROUND_CONCURRENCY = 3;
+  const BACKGROUND_COOLDOWN_MS = 30000;
+  const FOREGROUND_KEY = "@DualSubs-AI.LastSubtitleLoad.v1";
   const executionDeadline =
     Date.now() + (isBackgroundPing ? BACKGROUND_BUDGET_MS : Math.min(config.maxWaitMs, CLIENT_SAFE_MAX_WAIT_MS));
   // 没翻完的视频的后台任务：全部原文 + 缓存键；只保留最近 2 个，3 小时后作废
@@ -291,7 +296,7 @@
   // 在截止时间前尽量多翻：按时间顺序派发批次，到点就带着已完成的行返回，
   // 不等仍在途的请求。整批失败（限流、报错、返回坏 JSON）或少返回的行，
   // 时间够的话重发一次，尽量在第一次开字幕时就翻完。
-  async function translateWithinDeadline(batches, languages, expectedBatchMs) {
+  async function translateWithinDeadline(batches, languages, expectedBatchMs, options) {
     const rows = [];
     const failures = [];
     // 每批的耗时样本；超时或到点未完成的批次按 1.5 倍已用时间计，确保慢模型下次自动缩小批次
@@ -315,6 +320,7 @@
 
     async function runWorker() {
       while (!finished) {
+        if (options?.shouldStop?.()) return;
         if (remainingTime() < launchThreshold) return;
         const index = queue.findIndex((item) => !item.notBefore || item.notBefore <= Date.now());
         if (index < 0) {
@@ -348,7 +354,7 @@
         }
       }
     }
-    const workerCount = Math.min(config.concurrency, Math.max(1, batches.length));
+    const workerCount = Math.min(options?.concurrency || config.concurrency, Math.max(1, batches.length));
     const workers = Promise.all(Array.from({ length: workerCount }, () => runWorker()));
     let timer;
     await Promise.race([
@@ -557,6 +563,11 @@
     // 每次都记一条，方便确认 App 是否真的发了这类请求
     log("INFO", `Playback ping ${endpoint} for ${videoId || "?"}; background job: ${job ? `${job.remaining} rows left` : "none"}`);
     if (!job || !config.backgroundTranslate || !config.aiEnabled || !Core.isConfigured(config)) return;
+    const lastLoad = Number((typeof $persistentStore === "undefined" ? 0 : $persistentStore.read(FOREGROUND_KEY)) || 0);
+    if (Date.now() - lastLoad < BACKGROUND_COOLDOWN_MS) {
+      log("INFO", `Subtitles loaded ${Math.round((Date.now() - lastLoad) / 1000)}s ago; background translation waits`);
+      return;
+    }
     if (Date.now() - (job.createdAt || 0) > JOB_TTL_MS) {
       removeJob(videoId);
       return;
@@ -575,7 +586,19 @@
         const batches = attachContext(Core.chunkCues(pending, plan.size, config.maxBatchChars), job.cues);
         const rememberedThinking = readJsonStore(THINKING_KEY, {})[config.model];
         if (config.provider === "Gemini" && rememberedThinking) config.thinkingLevel = rememberedThinking;
-        const outcome = await translateWithinDeadline(batches, job.languages, plan.expectedMs);
+        const startedAt = Date.now();
+        const outcome = await translateWithinDeadline(batches, job.languages, plan.expectedMs, {
+          concurrency: BACKGROUND_CONCURRENCY,
+          // 有新的字幕加载（打开或切换视频）就停止发新批次
+          shouldStop: () => {
+            const latest = Number($persistentStore.read(FOREGROUND_KEY) || 0);
+            if (latest > startedAt) {
+              log("INFO", "New subtitle load detected; background translation pauses");
+              return true;
+            }
+            return false;
+          }
+        });
         recordSpeed(outcome.samples);
         const fresh = new Map(outcome.rows.map((row) => [String(row.id), row.text]));
         if (fresh.size && !writeRows(job.key, fresh)) {
@@ -618,6 +641,8 @@
   }
 
   async function handleRequest() {
+    // 字幕请求意味着正在打开或切换视频：记下时间，后台续翻据此让路
+    markSubtitleLoad();
     const rewritten = Core.rewriteTimedTextRequest($request.url, config);
     // 选了模型却没填那一家的 Key 时，字幕会只显示原文；提示一下，免得以为插件坏了
     if (rewritten.reason === "missing-config" && config.aiEnabled) {
@@ -650,6 +675,14 @@
 
   // 0.4.1 起直接翻原文字幕：YouTube 对带 tlang 的官方机翻请求返回 429，
   // 不能再用它做底座。没翻到的行暂时只显示原文。
+  function markSubtitleLoad() {
+    try {
+      if (typeof $persistentStore !== "undefined") $persistentStore.write(String(Date.now()), FOREGROUND_KEY);
+    } catch (_) {
+      // 只用于给后台让路
+    }
+  }
+
   async function handleResponse() {
     if (!Core.shouldProcessResponse($request.url)) {
       donePassthrough("skipped");
