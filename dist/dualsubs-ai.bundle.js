@@ -1,4 +1,4 @@
-// YouTube AI bilingual subtitles for Loon v0.7.1
+// YouTube AI bilingual subtitles for Loon v0.7.2
 // Translates the source timedtext response with Gemini; untranslated rows stay as source text.
 // Only intercepts /api/timedtext so it can run alongside YouTube ad-block plugins.
 // Never logs API keys or full subtitle payloads.
@@ -9,7 +9,7 @@
 })(typeof globalThis === "object" ? globalThis : this, function createYouTubeAICore() {
   "use strict";
 
-  const VERSION = "0.7.1";
+  const VERSION = "0.7.2";
   const QUERY_FLAG = "dsai";
   // 不能用 "tlang"：2026-10 起 YouTube 对带 tlang 的 timedtext 请求一律返回 429。
   const QUERY_TARGET = "dsai_target";
@@ -1165,14 +1165,28 @@
     }
   }
 
-  function sanitizedHeaders(contentType, result, error) {
+  // 条件请求头：带上它们时 YouTube 可能回 304，App 就继续用它缓存的旧字幕
+  const CONDITIONAL_REQUEST_HEADERS = /^(if-none-match|if-modified-since)$/i;
+
+  function sanitizedHeaders(contentType, result, error, options) {
     const headers = Object.assign({}, $response?.headers || {});
+    const rewritten = Boolean(options?.rewritten);
+    const noStore = Boolean(options?.noStore);
     Object.keys(headers).forEach((key) => {
       if (/^(content-length|transfer-encoding|content-encoding)$/i.test(key)) {
         delete headers[key];
       }
       if (/^content-type$/i.test(key)) delete headers[key];
+      // 改写过的字幕不能再用 YouTube 原文的校验值，否则 App 会拿它做条件请求、复用旧结果
+      if (rewritten && /^(etag|last-modified)$/i.test(key)) delete headers[key];
+      if (noStore && /^(cache-control|expires|pragma|age)$/i.test(key)) delete headers[key];
     });
+    if (noStore) {
+      // 只翻了一部分的字幕不让 App 缓存，下次加载这个视频时才会重新请求、接着翻
+      headers["cache-control"] = "no-store, no-cache, max-age=0, must-revalidate";
+      headers.pragma = "no-cache";
+      headers.expires = "0";
+    }
     if (contentType) headers["content-type"] = contentType;
     headers["content-encoding"] = "identity";
     headers["x-dualsubs-ai-result"] = result;
@@ -1185,15 +1199,17 @@
     return headers;
   }
 
-  function doneRequest(url) {
-    if (url === $request.url) return $done({});
-    return $done({ url });
+  function doneRequest(url, headers) {
+    if (url === $request.url && !headers) return $done({});
+    const value = { url };
+    if (headers) value.headers = headers;
+    return $done(value);
   }
 
-  function doneBody(body, contentType, result, error) {
+  function doneBody(body, contentType, result, error, options) {
     return $done(
       Object.assign({}, $response, {
-        headers: sanitizedHeaders(contentType, result, error),
+        headers: sanitizedHeaders(contentType, result, error, Object.assign({ rewritten: true }, options)),
         body
       })
     );
@@ -1492,7 +1508,14 @@
         entries.pop();
         payload = JSON.stringify(entries);
       }
-      if (payload.length <= ROWS_MAX_CHARS) $persistentStore.write(payload, ROWS_KEY);
+      if (payload.length > ROWS_MAX_CHARS) {
+        log("WARN", `Row cache too large to save (${payload.length} chars)`);
+        return;
+      }
+      // Loon 的 write 失败时返回 false；记下来，续翻不生效时能从日志看出原因
+      const saved = $persistentStore.write(payload, ROWS_KEY);
+      if (saved === false) log("WARN", `Row cache write failed (${payload.length} chars)`);
+      else log("DEBUG", `Row cache saved (${rows.size} rows, ${payload.length} chars)`);
     } catch (error) {
       log("WARN", `Row cache write skipped: ${safeError(error)}`);
     }
@@ -1575,7 +1598,18 @@
         `Requesting source subtitles (${rewritten.sourceLanguage} -> ${rewritten.targetLanguage}, ${rewritten.reason})`
       );
     }
-    doneRequest(rewritten.url);
+    // 要翻译的字幕请求去掉条件请求头，保证每次都拿到完整原文、脚本都能处理
+    let headers;
+    if (Core.shouldProcessResponse(rewritten.url)) {
+      const original = $request.headers || {};
+      const conditional = Object.keys(original).filter((key) => CONDITIONAL_REQUEST_HEADERS.test(key));
+      if (conditional.length) {
+        headers = Object.assign({}, original);
+        conditional.forEach((key) => delete headers[key]);
+        log("INFO", `Removed conditional headers: ${conditional.join(", ")}`);
+      }
+    }
+    doneRequest(rewritten.url, headers);
   }
 
   // 0.4.1 起直接翻原文字幕：YouTube 对带 tlang 的官方机翻请求返回 429，
@@ -1628,6 +1662,7 @@
       const languages = Core.responseLanguages($request.url, config);
       const rowsKey = Core.makeCacheKey($request.url, config, sourceDocument.cues, languages);
       const known = readRows(rowsKey);
+      log("INFO", `Saved AI rows for this video: ${known.size}`);
       const pending = sourceDocument.cues.filter((cue) => !known.has(String(cue.id)));
       const plan = batchPlan();
       const batches = attachContext(
@@ -1672,7 +1707,7 @@
           "AI 字幕部分完成"
         );
       }
-      doneBody(aiBody, contentType, complete ? "ai" : "ai-partial");
+      doneBody(aiBody, contentType, complete ? "ai" : "ai-partial", undefined, { noStore: !complete });
     } catch (error) {
       const message = safeError(error);
       log("WARN", `${message}; showing source subtitles`);

@@ -42,6 +42,7 @@ async function runLoon(overrides) {
         return store.get(key) || null;
       },
       write(value, key) {
+        if (overrides.writeFails) return false;
         store.set(key, value);
         return true;
       }
@@ -648,4 +649,77 @@ test("a batch that keeps failing is retried only once", async () => {
   });
   assert.equal(calls, 4, "两批各发两次");
   assert.equal(result.doneValue.headers["x-dualsubs-ai-result"], "source-only");
+});
+
+test("subtitle requests drop conditional headers so YouTube always returns the full source", async () => {
+  const result = await runLoon({
+    argument: config(),
+    request: {
+      url: "https://www.youtube.com/api/timedtext?v=abc&lang=en&fmt=json3",
+      method: "GET",
+      headers: { "If-None-Match": "\"abc\"", "if-modified-since": "Thu, 01 Oct 2026 00:00:00 GMT", Cookie: "c" }
+    }
+  });
+  assert.equal(new URL(result.doneValue.url).searchParams.get("dsai"), "1");
+  assert.equal(JSON.stringify(result.doneValue.headers), JSON.stringify({ Cookie: "c" }));
+});
+
+test("partial results tell the app not to cache them; complete results drop the source validators", async () => {
+  const headers = { "Content-Type": "application/json", ETag: "\"src\"", "Last-Modified": "x", "Cache-Control": "private, max-age=86400" };
+  const partial = await partialRun({
+    store: new Map(),
+    onPost(request, callback) {
+      const ids = requestedIds(request);
+      if (ids[0] === 0) callback(null, { status: 200 }, geminiRows(ids.map((id) => ({ id, text: `AI${id}` }))));
+    }
+  });
+  // partialRun 的响应头没有 ETag，单独构造一次带校验头的部分结果
+  const partialWithValidators = await runLoon({
+    argument: { ...config(), parallel: "2", batch_size: "5", max_wait_ms: "3000", timeout_ms: "3000" },
+    request: { url: processedUrl("json3", "validators"), method: "GET", headers: {} },
+    response: { status: 200, headers, body: tenCueJson3("Line ") },
+    httpClient: {
+      get: noGet,
+      post(request, callback) {
+        const ids = requestedIds(request);
+        if (ids[0] === 0) callback(null, { status: 200 }, geminiRows(ids.map((id) => ({ id, text: `AI${id}` }))));
+      }
+    },
+    doneTimeoutMs: 4500
+  });
+  for (const result of [partial, partialWithValidators]) {
+    const h = result.doneValue.headers;
+    assert.equal(h["x-dualsubs-ai-result"], "ai-partial");
+    assert.match(h["cache-control"], /no-store/);
+    assert.equal(h.ETag, undefined);
+    assert.equal(h["Last-Modified"], undefined);
+    assert.equal(h["Cache-Control"], undefined, "原来的缓存头要去掉，不能和 no-store 并存");
+  }
+
+  const complete = await runLoon({
+    argument: config(),
+    request: { url: processedUrl("json3", "complete"), method: "GET", headers: {} },
+    response: { status: 200, headers, body: sourceJson3() },
+    httpClient: { get: noGet, post: (_request, callback) => successfulGemini(callback) }
+  });
+  const h = complete.doneValue.headers;
+  assert.equal(h["x-dualsubs-ai-result"], "ai");
+  assert.equal(h.ETag, undefined);
+  assert.equal(h["Last-Modified"], undefined);
+  assert.equal(h["Cache-Control"], "private, max-age=86400", "全部翻完的结果允许缓存");
+});
+
+test("a failed row-cache write is logged instead of silently losing progress", async () => {
+  const lines = [];
+  const result = await runLoon({
+    argument: { ...config(), LogLevel: "INFO" },
+    request: { url: processedUrl("json3", "writefail"), method: "GET", headers: {} },
+    response: { status: 200, headers: { "Content-Type": "application/json" }, body: sourceJson3() },
+    httpClient: { get: noGet, post: (_request, callback) => successfulGemini(callback) },
+    console: { log: (line) => lines.push(line) },
+    writeFails: true
+  });
+  assert.equal(result.doneValue.headers["x-dualsubs-ai-result"], "ai");
+  assert.ok(lines.some((line) => /Saved AI rows for this video: 0/.test(line)));
+  assert.ok(lines.some((line) => /Row cache write failed/.test(line)), lines.join("\n"));
 });

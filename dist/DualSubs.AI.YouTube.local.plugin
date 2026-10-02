@@ -6,7 +6,7 @@
 #!system = iOS,iPadOS,macOS
 #!system_version = 15
 #!loon_version = 3.4.0(962)
-#!version = 0.7.1
+#!version = 0.7.2
 
 [Argument]
 ai_enabled = switch,true,tag=AI 翻译,desc=关闭后不做翻译，只显示 YouTube 原文字幕
