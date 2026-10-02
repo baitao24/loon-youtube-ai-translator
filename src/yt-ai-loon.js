@@ -5,8 +5,9 @@
   const CACHE_KEY = "@DualSubs-AI.Cache.v1";
   const NOTICE_KEY = "@DualSubs-AI.Notices.v2";
   // 按视频保存已翻好的 AI 行；没翻完的视频下次请求字幕时只翻剩下的行。
-  const ROWS_KEY = "@DualSubs-AI.Rows.v1";
-  const ROWS_MAX_CHARS = 400000;
+  // 每个视频单独一个存储键（避免所有视频挤在一条里撞到存储上限），索引记录最近的视频用于淘汰
+  const ROWS_PREFIX = "@DualSubs-AI.Rows.v2:";
+  const ROWS_INDEX_KEY = "@DualSubs-AI.RowsIndex.v2";
   // 剩余时间不够一批正常耗时（真机 2～3 秒）就不再发新批次。
   const MIN_LAUNCH_MS = 2000;
   const RENDER_RESERVE_MS = 150;
@@ -418,42 +419,47 @@
     return batches;
   }
 
-  function loadRowStore() {
-    if (config.cacheEntries <= 0 || typeof $persistentStore === "undefined") return [];
+  function readRows(key) {
+    if (config.cacheEntries <= 0 || typeof $persistentStore === "undefined") return new Map();
     try {
-      const parsed = JSON.parse($persistentStore.read(ROWS_KEY) || "[]");
-      return Array.isArray(parsed) ? parsed : [];
+      const parsed = JSON.parse($persistentStore.read(ROWS_PREFIX + key) || "{}");
+      return new Map(Object.entries(parsed && typeof parsed === "object" ? parsed : {}));
     } catch (_) {
-      return [];
+      return new Map();
     }
   }
 
-  function readRows(key) {
-    const entry = loadRowStore().find((item) => item?.key === key);
-    return new Map(Object.entries(entry?.rows || {}));
-  }
-
+  // 写入前先读最新存储再合并：开字幕和后台续翻可能先后写同一个视频，合并才不会互相覆盖。
+  // 写完读回核对，返回实际存下的行；写入失败返回 null
   function writeRows(key, rows) {
-    if (config.cacheEntries <= 0 || typeof $persistentStore === "undefined") return;
+    if (config.cacheEntries <= 0 || typeof $persistentStore === "undefined") return null;
     try {
-      const entries = loadRowStore().filter((item) => item?.key !== key);
-      entries.unshift({ key, updatedAt: Date.now(), rows: Object.fromEntries(rows) });
-      while (entries.length > config.cacheEntries) entries.pop();
-      let payload = JSON.stringify(entries);
-      while (payload.length > ROWS_MAX_CHARS && entries.length > 1) {
-        entries.pop();
-        payload = JSON.stringify(entries);
+      const merged = readRows(key);
+      rows.forEach((text, id) => merged.set(String(id), text));
+      const payload = JSON.stringify(Object.fromEntries(merged));
+      const saved = $persistentStore.write(payload, ROWS_PREFIX + key);
+      const stored = readRows(key);
+      if (saved === false || stored.size < merged.size) {
+        log("WARN", `Row cache write failed (${merged.size} rows, ${payload.length} chars)`);
+        return null;
       }
-      if (payload.length > ROWS_MAX_CHARS) {
-        log("WARN", `Row cache too large to save (${payload.length} chars)`);
-        return;
-      }
-      // Loon 的 write 失败时返回 false；记下来，续翻不生效时能从日志看出原因
-      const saved = $persistentStore.write(payload, ROWS_KEY);
-      if (saved === false) log("WARN", `Row cache write failed (${payload.length} chars)`);
-      else log("DEBUG", `Row cache saved (${rows.size} rows, ${payload.length} chars)`);
+      log("DEBUG", `Row cache saved (${stored.size} rows, ${payload.length} chars)`);
+      // 更新索引，只保留最近的几个视频，淘汰的清空
+      const index = readJsonStore(ROWS_INDEX_KEY, []);
+      const list = (Array.isArray(index) ? index : []).filter((item) => item !== key);
+      list.unshift(key);
+      list.slice(config.cacheEntries).forEach((old) => {
+        try {
+          $persistentStore.write("", ROWS_PREFIX + old);
+        } catch (_) {
+          // 清理失败不影响本次结果
+        }
+      });
+      writeJsonStore(ROWS_INDEX_KEY, list.slice(0, config.cacheEntries));
+      return stored;
     } catch (error) {
       log("WARN", `Row cache write skipped: ${safeError(error)}`);
+      return null;
     }
   }
 
@@ -571,15 +577,20 @@
         if (config.provider === "Gemini" && rememberedThinking) config.thinkingLevel = rememberedThinking;
         const outcome = await translateWithinDeadline(batches, job.languages, plan.expectedMs);
         recordSpeed(outcome.samples);
-        outcome.rows.forEach((row) => known.set(String(row.id), row.text));
-        if (outcome.rows.length) writeRows(job.key, known);
+        const fresh = new Map(outcome.rows.map((row) => [String(row.id), row.text]));
+        if (fresh.size && !writeRows(job.key, fresh)) {
+          log("WARN", `Background rows for ${videoId} could not be saved; will retry on the next ping`);
+        }
         log(
           "INFO",
           `Background translated ${outcome.rows.length} rows for ${videoId}, failed batches ${outcome.failures.length}` +
             (outcome.failures.length ? `, first failure: ${safeError(outcome.failures[0])}` : "")
         );
       }
-      const left = job.cues.filter((cue) => !known.has(String(cue.id))).length;
+      // 以真正存下来的为准判断是否翻完，避免写入失败时也通知「已完成」
+      const stored = readRows(job.key);
+      const left = job.cues.filter((cue) => !stored.has(String(cue.id))).length;
+      log("INFO", `Background progress for ${videoId}: ${job.cues.length - left}/${job.cues.length} saved`);
       if (left === 0) {
         removeJob(videoId);
         log("INFO", `Background translation finished for ${videoId}`);
@@ -706,7 +717,11 @@
         : { rows: [], failures: [], launched: 0, retried: 0, samples: [] };
       recordSpeed(outcome.samples);
       outcome.rows.forEach((row) => known.set(String(row.id), row.text));
-      if (outcome.rows.length) writeRows(rowsKey, known);
+      if (outcome.rows.length) {
+        const stored = writeRows(rowsKey, new Map(outcome.rows.map((row) => [String(row.id), row.text])));
+        // 合并后可能多出后台刚翻好的行，一起显示
+        if (stored) stored.forEach((text, id) => known.set(id, text));
+      }
 
       const aiRows = sourceDocument.cues
         .filter((cue) => known.has(String(cue.id)))

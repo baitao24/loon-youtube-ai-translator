@@ -903,3 +903,76 @@ test("background translation waits longer per request, so slow models still make
   assert.ok(Date.now() - started >= 6000);
   assert.equal(JSON.parse(store.get("@DualSubs-AI.BackgroundJobs.v1")).slowbg, undefined, "后台应翻完并删除任务");
 });
+
+function storedRows(store) {
+  const key = [...store.keys()].find((name) => name.startsWith("@DualSubs-AI.Rows.v2:"));
+  return key ? JSON.parse(store.get(key) || "{}") : {};
+}
+
+test("a reopen running alongside background translation does not overwrite the background rows", async () => {
+  const store = new Map();
+  const notes = [];
+  await slowFirstOpen(store, notes, "race");
+  assert.deepEqual(Object.keys(storedRows(store)).sort(), ["0", "1", "2", "3", "4"]);
+
+  // 重开视频（慢：1.5 秒后只翻出第 5 行）与后台续翻（快：立刻翻完 5～9）同时进行
+  const reopen = runLoon({
+    argument: { ...config(), parallel: "2", batch_size: "5", max_wait_ms: "3000", timeout_ms: "3000" },
+    request: { url: processedUrl("json3", "race"), method: "GET", headers: {} },
+    response: { status: 200, headers: { "Content-Type": "application/json" }, body: tenCueJson3("Line ") },
+    store,
+    doneTimeoutMs: 4500,
+    httpClient: {
+      get: noGet,
+      post(request, callback) {
+        const ids = requestedIds(request);
+        setTimeout(() => callback(null, { status: 200 }, geminiRows([{ id: ids[0], text: `前台${ids[0]}` }])), 1500);
+      }
+    }
+  });
+  const ping = runLoon({
+    argument: config(),
+    request: { url: pingUrl("race"), method: "POST", headers: {} },
+    store,
+    notification: { post: (...parts) => notes.push(parts.join(" | ")) },
+    httpClient: {
+      get: noGet,
+      post(request, callback) {
+        const ids = requestedIds(request);
+        callback(null, { status: 200 }, geminiRows(ids.map((id) => ({ id, text: `后台${id}` }))));
+      }
+    }
+  });
+  const [reopened] = await Promise.all([reopen, ping]);
+  const rows = storedRows(store);
+  assert.equal(Object.keys(rows).length, 10, "两边的结果都要保留");
+  assert.match(rows["9"], /后台9/);
+  // 前台合并了后台刚存的行，这次就能完整显示
+  assert.equal(reopened.doneValue.headers["x-dualsubs-ai-result"], "ai");
+});
+
+test("background translation only reports completion after the rows are really saved", async () => {
+  const store = new Map();
+  const notes = [];
+  await slowFirstOpen(store, notes, "unsaved");
+  const lines = [];
+  await runLoon({
+    argument: { ...config(), LogLevel: "INFO" },
+    request: { url: pingUrl("unsaved"), method: "POST", headers: {} },
+    store,
+    writeFails: true,
+    console: { log: (line) => lines.push(line) },
+    notification: { post: (...parts) => notes.push(parts.join(" | ")) },
+    httpClient: {
+      get: noGet,
+      post(request, callback) {
+        const ids = requestedIds(request);
+        callback(null, { status: 200 }, geminiRows(ids.map((id) => ({ id, text: `AI${id}` }))));
+      }
+    }
+  });
+  assert.ok(!notes.some((note) => /后台翻译完成/.test(note)), "存不进去就不能说翻完了");
+  assert.ok(lines.some((line) => /could not be saved/.test(line)), lines.join("\n"));
+  assert.ok(lines.some((line) => /Background progress for unsaved: 5\/10 saved/.test(line)));
+  assert.ok(JSON.parse(store.get("@DualSubs-AI.BackgroundJobs.v1")).unsaved, "任务保留，下次统计请求再试");
+});
