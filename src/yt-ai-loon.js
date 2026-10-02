@@ -20,6 +20,8 @@
   const MAX_BATCH_ROWS = 40;
   // 每批附带前面几行原文作上下文，避免句子被批次切断后译得生硬
   const CONTEXT_ROWS = 2;
+  // 失败批次和少返回的行最多重发一次
+  const MAX_BATCH_RETRIES = 1;
   const LOG_LEVELS = { OFF: 99, ERROR: 40, WARN: 30, INFO: 20, DEBUG: 10 };
   const CLIENT_SAFE_MAX_WAIT_MS = 6200;
   const config = Core.normalizeConfig(
@@ -235,20 +237,43 @@
 
   // 在截止时间前尽量多翻：按时间顺序派发批次，到点就带着已完成的行返回，
   // 不等仍在途的请求。单批失败不影响其他批次。
+  // 在截止时间前尽量多翻：按时间顺序派发批次，到点就带着已完成的行返回，
+  // 不等仍在途的请求。整批失败（限流、报错、返回坏 JSON）或少返回的行，
+  // 时间够的话重发一次，尽量在第一次开字幕时就翻完。
   async function translateWithinDeadline(batches, languages, expectedBatchMs) {
     const rows = [];
     const failures = [];
     // 每批的耗时样本；超时或到点未完成的批次按 1.5 倍已用时间计，确保慢模型下次自动缩小批次
     const samples = [];
     const inFlight = new Map();
+    const queue = batches.slice();
     const launchThreshold = Math.max(MIN_LAUNCH_MS, Math.round((expectedBatchMs || 0) * 0.8));
-    let nextIndex = 0;
+    let launched = 0;
+    let retried = 0;
     let finished = false;
+
+    function requeue(cues, parent, waitMs) {
+      if ((parent.attempt || 0) >= MAX_BATCH_RETRIES || !cues.length) return;
+      const retry = cues.slice();
+      retry.attempt = (parent.attempt || 0) + 1;
+      retry.context = parent.context;
+      retry.notBefore = Date.now() + (waitMs || 0);
+      queue.push(retry);
+      retried += 1;
+    }
+
     async function runWorker() {
-      while (!finished && nextIndex < batches.length) {
+      while (!finished) {
         if (remainingTime() < launchThreshold) return;
-        const batch = batches[nextIndex];
-        nextIndex += 1;
+        const index = queue.findIndex((item) => !item.notBefore || item.notBefore <= Date.now());
+        if (index < 0) {
+          // 队列暂时空了，但在途批次可能还会放回重试，等一下再看
+          if (!queue.length && !inFlight.size) return;
+          await delay(80);
+          continue;
+        }
+        const batch = queue.splice(index, 1)[0];
+        launched += 1;
         const startedAt = Date.now();
         inFlight.set(batch, startedAt);
         try {
@@ -257,13 +282,18 @@
           inFlight.delete(batch);
           samples.push({ rows: batch.length, ms: Date.now() - startedAt });
           rows.push(...translated);
+          const got = new Set(translated.map((row) => String(row.id)));
+          requeue(batch.filter((cue) => !got.has(String(cue.id))), batch, 0);
         } catch (error) {
           if (finished) return;
           inFlight.delete(batch);
-          if (/timeout/i.test(String(error?.message || ""))) {
-            samples.push({ rows: batch.length, ms: (Date.now() - startedAt) * 1.5 });
-          }
           failures.push(error);
+          if (/timeout|deadline/i.test(String(error?.message || ""))) {
+            samples.push({ rows: batch.length, ms: (Date.now() - startedAt) * 1.5 });
+          } else {
+            // 限流稍等再发，其他错误立刻重发
+            requeue(batch, batch, error?.status === 429 ? 600 : 0);
+          }
         }
       }
     }
@@ -281,7 +311,7 @@
     inFlight.forEach((startedAt, batch) => {
       samples.push({ rows: batch.length, ms: (Date.now() - startedAt) * 1.5 });
     });
-    return { rows: rows.slice(), failures, launched: nextIndex, samples };
+    return { rows: rows.slice(), failures, launched, retried, samples };
   }
 
   function readJsonStore(key, fallback) {
@@ -515,7 +545,7 @@
       );
       const outcome = batches.length
         ? await translateWithinDeadline(batches, languages, plan.expectedMs)
-        : { rows: [], failures: [], launched: 0, samples: [] };
+        : { rows: [], failures: [], launched: 0, retried: 0, samples: [] };
       recordSpeed(outcome.samples);
       outcome.rows.forEach((row) => known.set(String(row.id), row.text));
       if (outcome.rows.length) writeRows(rowsKey, known);
@@ -532,7 +562,7 @@
       log(
         "INFO",
         `AI rows ${aiRows.length}/${sourceDocument.cues.length} (${percent}%), ` +
-          `new ${outcome.rows.length}, failed batches ${outcome.failures.length}, ` +
+          `new ${outcome.rows.length}, failed batches ${outcome.failures.length}, retried ${outcome.retried}, ` +
           `${Date.now() - scriptStartedAt}ms` +
           (outcome.failures.length ? `, first failure: ${safeError(outcome.failures[0])}` : "")
       );
@@ -540,7 +570,7 @@
         writeCache(responseCacheKey, { body: aiBody, contentType, result: "ai" }, 86400000);
       } else {
         notifyFallback(
-          `已用 AI 翻译 ${percent}%，其余暂时只显示原文。关闭再打开字幕会继续翻译剩下的部分。`,
+          `已用 AI 翻译 ${percent}%，其余暂时只显示原文。翻好的部分已保存，重新打开这个视频时会接着翻译剩下的部分。`,
           "AI 字幕部分完成"
         );
       }

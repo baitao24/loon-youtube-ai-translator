@@ -1,5 +1,5 @@
 #!name = YouTube AI 双语字幕
-#!desc = 用 AI 把 YouTube 字幕翻成双语，支持 Gemini、DeepSeek、OpenAI、Claude。开字幕后约 6 秒内尽量多翻，没翻到的行先显示原文；关掉再打开字幕会接着翻。只需填写所选模型那一家的 API Key。
+#!desc = 用 AI 把 YouTube 字幕翻成双语，支持 Gemini、DeepSeek、OpenAI、Claude。开字幕后约 6 秒内尽量多翻，失败的部分会当场重试；长视频没翻到的行先显示原文，重新打开视频时接着翻。只需填写所选模型那一家的 API Key。
 #!author = aot & Claude
 #!homepage = https://github.com/baitao24/loon-youtube-ai-translator
 #!tag = YouTube,字幕,AI,翻译

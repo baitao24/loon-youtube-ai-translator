@@ -595,3 +595,57 @@ test("sentence regrouping can be turned off and changes the cache identity", asy
   const key = (value) => Core.makeResponseCacheKey(processedUrl("json3", "split"), body, Core.normalizeConfig({ ...config(), sentence_split: value }));
   assert.notEqual(key(true), key(false));
 });
+
+test("a rate-limited batch is retried in the same run and the subtitles complete", async () => {
+  const calls = new Map();
+  const logs = [];
+  const result = await partialRun({
+    store: new Map(),
+    onPost(request, callback) {
+      const ids = requestedIds(request);
+      const key = ids.join(",");
+      calls.set(key, (calls.get(key) || 0) + 1);
+      // 第二批第一次被限流，重发后正常
+      if (ids[0] === 5 && calls.get(key) === 1) {
+        callback(null, { status: 429 }, JSON.stringify({ error: { message: "rate limited" } }));
+        return;
+      }
+      callback(null, { status: 200 }, geminiRows(ids.map((id) => ({ id, text: `AI${id}` }))));
+    }
+  });
+  const events = JSON.parse(result.doneValue.body).events.map((event) => event.segs[0].utf8);
+  assert.deepEqual(events, Array.from({ length: 10 }, (_, i) => `AI${i}\nLine ${i}`));
+  assert.equal(result.doneValue.headers["x-dualsubs-ai-result"], "ai");
+  assert.equal(calls.get("5,6,7,8,9"), 2);
+});
+
+test("rows the model dropped are re-requested on their own and filled in", async () => {
+  const requests = [];
+  const result = await partialRun({
+    store: new Map(),
+    onPost(request, callback) {
+      const ids = requestedIds(request);
+      requests.push(ids);
+      // 第一次总是漏掉第 3 行，单独重发时正常返回
+      const rows = ids.length > 1 ? ids.filter((id) => id !== 3) : ids;
+      callback(null, { status: 200 }, geminiRows(rows.map((id) => ({ id, text: `AI${id}` }))));
+    }
+  });
+  assert.ok(requests.some((ids) => ids.length === 1 && ids[0] === 3), "第 3 行应单独重发");
+  const events = JSON.parse(result.doneValue.body).events.map((event) => event.segs[0].utf8);
+  assert.deepEqual(events, Array.from({ length: 10 }, (_, i) => `AI${i}\nLine ${i}`));
+  assert.equal(result.doneValue.headers["x-dualsubs-ai-result"], "ai");
+});
+
+test("a batch that keeps failing is retried only once", async () => {
+  let calls = 0;
+  const result = await partialRun({
+    store: new Map(),
+    onPost(_request, callback) {
+      calls += 1;
+      callback(null, { status: 500 }, "{}");
+    }
+  });
+  assert.equal(calls, 4, "两批各发两次");
+  assert.equal(result.doneValue.headers["x-dualsubs-ai-result"], "source-only");
+});
