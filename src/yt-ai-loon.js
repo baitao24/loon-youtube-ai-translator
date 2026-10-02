@@ -487,6 +487,13 @@
       donePassthrough("source-only");
       return;
     }
+    if (config.sentenceSplit) {
+      const originalCount = sourceDocument.cues.length;
+      sourceDocument = Core.resegmentDocument(sourceDocument);
+      if (sourceDocument.resegmented) {
+        log("INFO", `Resegmented ${originalCount} cues into ${sourceDocument.cues.length} sentences`);
+      }
+    }
     const contentType = subtitleContentType(sourceDocument);
 
     try {

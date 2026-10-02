@@ -1,4 +1,4 @@
-// YouTube AI bilingual subtitles for Loon v0.6.1
+// YouTube AI bilingual subtitles for Loon v0.7.0
 // Translates the source timedtext response with Gemini; untranslated rows stay as source text.
 // Only intercepts /api/timedtext so it can run alongside YouTube ad-block plugins.
 // Never logs API keys or full subtitle payloads.
@@ -9,7 +9,7 @@
 })(typeof globalThis === "object" ? globalThis : this, function createYouTubeAICore() {
   "use strict";
 
-  const VERSION = "0.6.1";
+  const VERSION = "0.7.0";
   const QUERY_FLAG = "dsai";
   // 不能用 "tlang"：2026-10 起 YouTube 对带 tlang 的 timedtext 请求一律返回 429。
   const QUERY_TARGET = "dsai_target";
@@ -163,6 +163,7 @@
         raw.auto_translate ?? raw.autoTranslate ?? raw.AutoTranslate,
         DEFAULTS.autoTranslate
       ),
+      sentenceSplit: toBoolean(raw.sentence_split ?? raw.sentenceSplit, true),
       showOnly: toBoolean(
         raw.show_only ?? raw.showOnly ?? raw.ShowOnly,
         DEFAULTS.showOnly
@@ -826,7 +827,169 @@
     throw new Error("Unsupported YouTube subtitle format");
   }
 
+  // ---------- 按句重新分条 ----------
+  // 自动字幕按约 80 字符硬切，常把上一句结尾和下一句开头放在同一条里。
+  // 这里把字幕拆成词，按每条的时间段和字数估算每个词的时间，再按句末标点重新分条。
+  const SENTENCE_MAX_CHARS = 90;
+  // 只把 "Yeah." "Okay." 这类很短的语气词并到下一句；"It was late." 这种完整短句保留
+  const SENTENCE_MIN_CHARS = 10;
+  const ABBREVIATIONS = new Set([
+    "mr", "mrs", "ms", "dr", "prof", "sr", "jr", "st", "vs", "etc", "e.g", "i.e", "u.s", "u.k", "inc", "ltd", "co", "no", "vol", "approx"
+  ]);
+  const SPLIT_BEFORE_WORDS = new Set(["and", "but", "so", "because", "which", "that", "when", "if", "or", "while", "where"]);
+
+  function endsSentence(word, nextWord) {
+    if (!/[.!?。！？…]["'”’)\]]*$/.test(word)) return false;
+    const bare = word.replace(/["'”’)\]]+$/, "").replace(/[.!?。！？…]+$/, "").toLowerCase();
+    if (/[.]$/.test(word.replace(/["'”’)\]]+$/, "")) && (ABBREVIATIONS.has(bare) || /^[a-z]$/i.test(bare))) {
+      return false;
+    }
+    // 下一词小写开头多半是句中（如 "approx. ten"），不断
+    return !nextWord || !/^[a-z]/.test(nextWord);
+  }
+
+  // 每条字幕实际"说话"的时间段：滚动字幕的下一条开始时，上一条基本说完了
+  function speechWindows(cues) {
+    return cues.map((cue, index) => {
+      const next = cues[index + 1];
+      const naturalEnd = cue.startMs + Math.max(cue.durationMs, 500);
+      const end = next && next.startMs > cue.startMs ? Math.min(naturalEnd, next.startMs) : naturalEnd;
+      return { start: cue.startMs, end: Math.max(end, cue.startMs + 300) };
+    });
+  }
+
+  function timedWords(cues) {
+    const windows = speechWindows(cues);
+    const words = [];
+    cues.forEach((cue, index) => {
+      const parts = singleLine(cue.text).split(/\s+/).filter(Boolean);
+      const totalChars = parts.reduce((sum, part) => sum + part.length + 1, 0) || 1;
+      const { start, end } = windows[index];
+      let chars = 0;
+      parts.forEach((part) => {
+        const at = start + Math.round(((end - start) * chars) / totalChars);
+        chars += part.length + 1;
+        const until = start + Math.round(((end - start) * chars) / totalChars);
+        words.push({ text: part, start: at, end: until });
+      });
+    });
+    return words;
+  }
+
+  // 太长的句子优先在逗号后切，其次在连词前切，都没有就在当前位置切
+  function splitPoint(words) {
+    const total = words.reduce((sum, word) => sum + word.text.length + 1, 0);
+    let chars = 0;
+    let commaAt = -1;
+    let conjunctionAt = -1;
+    words.forEach((word, index) => {
+      chars += word.text.length + 1;
+      if (chars < total * 0.35 || index === words.length - 1) return;
+      if (/[,;:，；：]$/.test(word.text)) commaAt = index + 1;
+      else if (SPLIT_BEFORE_WORDS.has(words[index + 1]?.text.toLowerCase())) conjunctionAt = index + 1;
+    });
+    return commaAt > 0 ? commaAt : conjunctionAt > 0 ? conjunctionAt : words.length;
+  }
+
+  function groupSentences(words) {
+    const groups = [];
+    let current = [];
+    const length = (list) => list.reduce((sum, word) => sum + word.text.length + 1, 0) - 1;
+    words.forEach((word, index) => {
+      current.push(word);
+      if (length(current) > SENTENCE_MAX_CHARS) {
+        const at = splitPoint(current.slice(0, -1));
+        groups.push(current.slice(0, at));
+        current = current.slice(at);
+      }
+      if (endsSentence(word.text, words[index + 1]?.text)) {
+        groups.push(current);
+        current = [];
+      }
+    });
+    if (current.length) groups.push(current);
+    // 很短的句子（如 "Yeah."）并到下一句，避免一闪而过
+    const merged = [];
+    groups.forEach((group) => {
+      const previous = merged[merged.length - 1];
+      if (
+        previous &&
+        length(previous) < SENTENCE_MIN_CHARS &&
+        length(previous) + length(group) + 1 <= SENTENCE_MAX_CHARS &&
+        group[0].start - previous[previous.length - 1].end < 1000
+      ) {
+        merged[merged.length - 1] = previous.concat(group);
+      } else {
+        merged.push(group);
+      }
+    });
+    return merged;
+  }
+
+  // 只对带句末标点的字幕重新分条；人工字幕那种没有标点的短句保持原样
+  function shouldResegment(cues) {
+    if (cues.length < 2) return false;
+    const enders = cues.reduce(
+      (sum, cue) => sum + (singleLine(cue.text).match(/[.!?。！？…](?=["'”’)\]]*(\s|$))/g) || []).length,
+      0
+    );
+    const midCue = cues.filter((cue) => /[.!?。！？](\s+)\S/.test(singleLine(cue.text))).length;
+    return enders >= cues.length * 0.3 && midCue >= cues.length * 0.15;
+  }
+
+  function resegmentDocument(document) {
+    if (!shouldResegment(document.cues)) return document;
+    const groups = groupSentences(timedWords(document.cues));
+    const cues = groups.map((group, index) => ({
+      id: index,
+      startMs: group[0].start,
+      lastWordEnd: group[group.length - 1].end,
+      text: group.map((word) => word.text).join(" ")
+    }));
+    cues.forEach((cue, index) => {
+      const next = cues[index + 1];
+      let end = cue.lastWordEnd + 600;
+      // 和下一句之间停顿不长时，一直显示到下一句出现，避免字幕闪烁
+      if (next && next.startMs - cue.lastWordEnd < 1200) end = next.startMs;
+      if (next) end = Math.min(end, next.startMs);
+      cue.durationMs = Math.max(end - cue.startMs, Math.min(800, next ? next.startMs - cue.startMs : 800));
+      delete cue.lastWordEnd;
+    });
+    return Object.assign({}, document, { cues, resegmented: true });
+  }
+
+  function renderResegmented(document, translations, config) {
+    const byId = new Map(translations.map((row) => [String(row.id), row.text]));
+    const textFor = (cue) => {
+      const translated = byId.get(String(cue.id));
+      return translated ? combineText(cue.text, translated, config) : singleLine(cue.text);
+    };
+    if (document.format === "json3") {
+      const value = JSON.parse(JSON.stringify(document.value));
+      // 保留窗口定义等非文字事件，文字事件全部换成新分好的句子
+      const keep = (value.events || []).filter((event) => !Array.isArray(event?.segs));
+      value.events = keep.concat(
+        document.cues.map((cue) => ({
+          tStartMs: cue.startMs,
+          dDurationMs: cue.durationMs,
+          segs: [{ utf8: textFor(cue) }]
+        }))
+      );
+      return JSON.stringify(value);
+    }
+    const xml = String(document.value || "");
+    const body = document.cues
+      .map((cue) => `<p t="${cue.startMs}" d="${cue.durationMs}"><s>${escapeXml(textFor(cue))}</s></p>`)
+      .join("\n");
+    // 去掉原来的段落和滚动窗口（<w>），新句子用默认窗口逐条显示
+    if (/<body>[\s\S]*<\/body>/i.test(xml)) {
+      return xml.replace(/<body>[\s\S]*<\/body>/i, `<body>\n${body}\n</body>`);
+    }
+    return `<?xml version="1.0" encoding="utf-8" ?><timedtext format="3">\n<body>\n${body}\n</body>\n</timedtext>`;
+  }
+
   function renderSubtitleDocument(document, translations, config) {
+    if (document.resegmented) return renderResegmented(document, translations, config);
     if (document.format === "json3") {
       const value = JSON.parse(JSON.stringify(document.value));
       return JSON.stringify(
@@ -884,6 +1047,7 @@
       aiEnabled: config.aiEnabled,
       showOnly: config.showOnly,
       position: config.position,
+      sentenceSplit: config.sentenceSplit,
       officialBody: fnv1a(String(responseBody || ""))
     };
     return `${CACHE_VERSION}:response:${fnv1a(JSON.stringify(identity))}`;
@@ -925,6 +1089,7 @@
     detectSubtitleFormat,
     parseSubtitleDocument,
     renderSubtitleDocument,
+    resegmentDocument,
     fnv1a,
     makeCacheKey,
     makeResponseCacheKey
@@ -1419,6 +1584,13 @@
     if (!config.aiEnabled || !Core.isConfigured(config) || !sourceDocument.cues.length) {
       donePassthrough("source-only");
       return;
+    }
+    if (config.sentenceSplit) {
+      const originalCount = sourceDocument.cues.length;
+      sourceDocument = Core.resegmentDocument(sourceDocument);
+      if (sourceDocument.resegmented) {
+        log("INFO", `Resegmented ${originalCount} cues into ${sourceDocument.cues.length} sentences`);
+      }
     }
     const contentType = subtitleContentType(sourceDocument);
 

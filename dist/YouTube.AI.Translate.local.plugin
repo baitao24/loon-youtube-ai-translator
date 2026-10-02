@@ -6,7 +6,7 @@
 #!system = iOS,iPadOS,macOS
 #!system_version = 15
 #!loon_version = 3.4.0(962)
-#!version = 0.6.1
+#!version = 0.7.0
 
 [Argument]
 ai_enabled = switch,true,tag=AI 翻译,desc=关闭后不做翻译，只显示 YouTube 原文字幕
@@ -18,6 +18,7 @@ claude_api_key = input,"",tag=Claude API Key,desc=选 claude 开头的模型时�
 target_language = select,"简体中文","繁體中文","日本語","한국어","English",tag=翻译成,desc=如果在 YouTube 字幕菜单里选了「自动翻译」成某种语言，以菜单为准
 Position = select,"原文在上","译文在上",tag=字幕顺序,desc=每种语言各占一行
 ShowOnly = switch,false,tag=只显示译文,desc=开启后不显示原文
+sentence_split = switch,true,tag=按句断句,desc=自动字幕常把上一句结尾和下一句开头放在同一条里。开启后按句子重新分条，原文和译文都更通顺；没有标点的字幕保持原样。显示时间按语速估算，如有异常可关闭
 custom_prompt = input,"",tag=额外翻译要求,desc=例如：人名保留英文；科技术语按业内习惯翻译。不要在这里填写密钥
 LogLevel = select,"INFO","DEBUG","WARN","ERROR","OFF",tag=日志等级,desc=排查问题时看 Loon 脚本日志；日志不记录 API Key 和字幕全文
 
@@ -25,9 +26,9 @@ LogLevel = select,"INFO","DEBUG","WARN","ERROR","OFF",tag=日志等级,desc=排�
 # 只拦截字幕接口（/api/timedtext），不碰 player、get_watch 等播放信息接口，
 # 避免和 YouTube 去广告插件处理同一个请求导致去广告失效
 # AI 翻译：请求阶段去掉 tlang（YouTube 对它返回 429），响应阶段直接翻原文字幕
-http-request ^https?:\/\/(www|m)\.youtube\.com\/api\/timedtext(\?.+)?$ script-path=dualsubs-ai.bundle.js, timeout=8, tag=AI 字幕请求, argument=[{ai_enabled},{model},{api_key},{deepseek_api_key},{openai_api_key},{claude_api_key},{target_language},{Position},{ShowOnly},{custom_prompt},{LogLevel}]
+http-request ^https?:\/\/(www|m)\.youtube\.com\/api\/timedtext(\?.+)?$ script-path=dualsubs-ai.bundle.js, timeout=8, tag=AI 字幕请求, argument=[{ai_enabled},{model},{api_key},{deepseek_api_key},{openai_api_key},{claude_api_key},{target_language},{Position},{ShowOnly},{sentence_split},{custom_prompt},{LogLevel}]
 # Loon 按改写前的地址匹配响应规则，所以这里匹配原始 timedtext 地址；脚本内部再检查 dsai 标记
-http-response ^https?:\/\/(www|m)\.youtube\.com\/api\/timedtext(\?.+)?$ requires-body=1, max-size=0, script-path=dualsubs-ai.bundle.js, timeout=8, tag=AI 字幕响应, argument=[{ai_enabled},{model},{api_key},{deepseek_api_key},{openai_api_key},{claude_api_key},{target_language},{Position},{ShowOnly},{custom_prompt},{LogLevel}]
+http-response ^https?:\/\/(www|m)\.youtube\.com\/api\/timedtext(\?.+)?$ requires-body=1, max-size=0, script-path=dualsubs-ai.bundle.js, timeout=8, tag=AI 字幕响应, argument=[{ai_enabled},{model},{api_key},{deepseek_api_key},{openai_api_key},{claude_api_key},{target_language},{Position},{ShowOnly},{sentence_split},{custom_prompt},{LogLevel}]
 
 [MITM]
 hostname = www.youtube.com, m.youtube.com

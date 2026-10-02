@@ -3,6 +3,7 @@ const { readFile } = require("node:fs/promises");
 const path = require("node:path");
 const test = require("node:test");
 const vm = require("node:vm");
+const Core = require("../src/yt-ai-core.js");
 
 const projectRoot = path.resolve(__dirname, "..");
 
@@ -560,4 +561,37 @@ test("turning AI off leaves the subtitle request unmarked and shows no hint", as
   });
   assert.equal(JSON.stringify(result.doneValue), "{}");
   assert.equal(notes.length, 0);
+});
+
+test("sentence regrouping can be turned off and changes the cache identity", async () => {
+  const body = JSON.stringify({
+    events: [
+      { tStartMs: 0, dDurationMs: 4000, segs: [{ utf8: "It was late. We went" }] },
+      { tStartMs: 4000, dDurationMs: 4000, segs: [{ utf8: "home together. Then it rained." }] }
+    ]
+  });
+  const subtitles = [];
+  const run = (sentenceSplit) =>
+    runLoon({
+      argument: { ...config(), sentence_split: sentenceSplit },
+      request: { url: processedUrl("json3", "split"), method: "GET", headers: {} },
+      response: { status: 200, headers: { "Content-Type": "application/json" }, body },
+      store: new Map(),
+      httpClient: {
+        get: noGet,
+        post(request, callback) {
+          const rows = JSON.parse(JSON.parse(request.body).contents[0].parts[0].text).subtitles;
+          subtitles.push(rows.map((row) => row.text));
+          callback(null, { status: 200 }, geminiRows(rows.map((row) => ({ id: row.id, text: `译${row.id}` }))));
+        }
+      }
+    });
+  const on = await run(true);
+  assert.deepEqual(subtitles[0], ["It was late.", "We went home together.", "Then it rained."]);
+  assert.equal(JSON.parse(on.doneValue.body).events.length, 3);
+  const off = await run(false);
+  assert.deepEqual(subtitles[1], ["It was late. We went", "home together. Then it rained."]);
+  assert.equal(JSON.parse(off.doneValue.body).events.length, 2);
+  const key = (value) => Core.makeResponseCacheKey(processedUrl("json3", "split"), body, Core.normalizeConfig({ ...config(), sentence_split: value }));
+  assert.notEqual(key(true), key(false));
 });

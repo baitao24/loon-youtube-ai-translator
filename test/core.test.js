@@ -38,7 +38,7 @@ test("normalizes DualSubs AI settings and keeps secrets opaque", () => {
     ai_enabled: "true",
     concurrency: "20"
   });
-  assert.equal(Core.VERSION, "0.6.1");
+  assert.equal(Core.VERSION, "0.7.0");
   assert.equal(config.provider, "OpenAI-Compatible");
   assert.equal(config.apiKey, "secret-value");
   assert.equal(config.model, "deepseek-chat");
@@ -427,4 +427,106 @@ test("built-in prompt covers subtitle style without needing a custom prompt", ()
   assert.match(system, /untrusted data/);
   assert.doesNotMatch(system, /Additional user preference/);
   assert.match(Core.buildPrompts([{ id: 0, text: "x" }], "en", "zh-Hans", "人名保留英文").system, /Additional user preference: 人名保留英文/);
+});
+
+// 模拟自动字幕：按约 80 字符硬切，句子跨条，滚动显示（下一条开始时上一条还没消失）
+function rollingAsrSrv3() {
+  const lines = [
+    "We started the trip early in the morning. The road was\nempty and quiet",
+    "for a long time. Then we saw the lake. It was bigger than\nwe expected, and",
+    "the water was very clear. Mr. Lee said it was the best\nview of the year.",
+    "Yeah. After lunch we walked around the lake for about\n2.5 hours, and by the",
+    "end everyone was tired but happy. [music] We drove home\nbefore sunset."
+  ];
+  const body = lines
+    .map((text, index) => `<p t="${index * 4000}" d="6000" w="1"><s ac="0">${text}</s></p>`)
+    .join("\n");
+  return `<?xml version="1.0" encoding="utf-8" ?><timedtext format="3">\n<head>\n<ws id="1" mh="2" ju="0" sd="3"/>\n</head>\n<body>\n<w t="0" id="1" wp="2" ws="1"/>\n${body}\n</body>\n</timedtext>`;
+}
+
+test("auto captions are regrouped into whole sentences with non-overlapping timing", () => {
+  const document = Core.parseSubtitleDocument(rollingAsrSrv3(), "text/xml");
+  const regrouped = Core.resegmentDocument(document);
+  assert.equal(regrouped.resegmented, true);
+  const texts = regrouped.cues.map((cue) => cue.text);
+  assert.deepEqual(texts, [
+    "We started the trip early in the morning.",
+    "The road was empty and quiet for a long time.",
+    "Then we saw the lake.",
+    "It was bigger than we expected, and the water was very clear.",
+    "Mr. Lee said it was the best view of the year.",
+    // "Yeah." 太短，并到下一句；整句超过 90 字符，在逗号后切开
+    "Yeah. After lunch we walked around the lake for about 2.5 hours,",
+    "and by the end everyone was tired but happy.",
+    "[music] We drove home before sunset."
+  ].map((text) => text));
+  regrouped.cues.forEach((cue, index) => {
+    const next = regrouped.cues[index + 1];
+    assert.ok(cue.durationMs > 0, `第 ${index} 条时长为正`);
+    if (next) {
+      assert.ok(cue.startMs < next.startMs, "开始时间递增");
+      assert.ok(cue.startMs + cue.durationMs <= next.startMs, "不和下一句重叠");
+    }
+  });
+  // 所有词按原顺序保留，一个不少
+  const words = (list) => list.map((text) => text.replace(/\n/g, " ")).join(" ").split(/\s+/);
+  assert.deepEqual(words(texts), words(document.cues.map((cue) => cue.text)));
+});
+
+test("long sentences split at a comma and stay within the length limit", () => {
+  const long =
+    "When we finally reached the top of the hill after walking for most of the afternoon, " +
+    "the wind was so strong that nobody could hear anything anyone else was trying to say to them.";
+  const xml = `<?xml version="1.0"?><timedtext format="3"><body>` +
+    `<p t="0" d="5000"><s>${long.slice(0, long.indexOf(" ", 75))}</s></p>` +
+    `<p t="5000" d="5000"><s>${long.slice(long.indexOf(" ", 75) + 1)} Then it rained.</s></p>` +
+    `<p t="10000" d="3000"><s>We ran. It was fun. Really fun.</s></p></body></timedtext>`;
+  const regrouped = Core.resegmentDocument(Core.parseSubtitleDocument(xml, "text/xml"));
+  assert.equal(regrouped.resegmented, true);
+  assert.ok(regrouped.cues.every((cue) => cue.text.length <= 90), regrouped.cues.map((c) => c.text.length).join(","));
+  assert.match(regrouped.cues[0].text, /afternoon,$/);
+});
+
+test("captions without sentence punctuation keep their original cues", () => {
+  const xml = '<?xml version="1.0"?><timedtext format="3"><body>' +
+    ["For a long time", "we did not know", "what to do next", "So we waited"]
+      .map((text, index) => `<p t="${index * 1500}" d="1400" wp="1">${text}</p>`)
+      .join("") + "</body></timedtext>";
+  const document = Core.parseSubtitleDocument(xml, "text/xml");
+  assert.equal(Core.resegmentDocument(document), document);
+});
+
+test("regrouped srv3 renders one sentence per paragraph and drops the rolling window", () => {
+  const regrouped = Core.resegmentDocument(Core.parseSubtitleDocument(rollingAsrSrv3(), "text/xml"));
+  const out = Core.renderSubtitleDocument(
+    regrouped,
+    [{ id: 0, text: "我们一早就出发了。" }, { id: 2, text: "然后我们看到了湖。" }],
+    { position: "SourceFirst", showOnly: false }
+  );
+  const paragraphs = [...out.matchAll(/<p t="(\d+)" d="(\d+)"><s>(.*?)<\/s><\/p>/g)];
+  assert.equal(paragraphs.length, regrouped.cues.length);
+  assert.equal(paragraphs[0][3], "We started the trip early in the morning.&#10;我们一早就出发了。");
+  assert.equal(paragraphs[1][3], "The road was empty and quiet for a long time.", "没翻到的句子只显示原文");
+  assert.doesNotMatch(out, /<w |w="1"/);
+  assert.match(out, /<head>[\s\S]*<\/head>/, "保留 head");
+});
+
+test("regrouped json3 keeps window definitions and replaces text events", () => {
+  const json = JSON.stringify({
+    events: [
+      { tStartMs: 0, dDurationMs: 20000, id: 1, wpWinPosId: 1, wsWinStyleId: 1 },
+      { tStartMs: 0, dDurationMs: 5000, wWinId: 1, segs: [{ utf8: "It was late. We" }, { utf8: " went", tOffsetMs: 300 }] },
+      { tStartMs: 4800, dDurationMs: 300, wWinId: 1, aAppend: 1, segs: [{ utf8: "\n" }] },
+      { tStartMs: 5000, dDurationMs: 5000, wWinId: 1, segs: [{ utf8: "home together. Then it rained." }] }
+    ]
+  });
+  const regrouped = Core.resegmentDocument(Core.parseSubtitleDocument(json, "application/json"));
+  assert.deepEqual(regrouped.cues.map((cue) => cue.text), ["It was late.", "We went home together.", "Then it rained."]);
+  const out = JSON.parse(Core.renderSubtitleDocument(regrouped, [{ id: 1, text: "我们一起回家。" }], { position: "SourceFirst" }));
+  assert.equal(out.events[0].id, 1, "窗口定义保留");
+  assert.deepEqual(out.events.slice(1).map((event) => event.segs[0].utf8), [
+    "It was late.",
+    "We went home together.\n我们一起回家。",
+    "Then it rained."
+  ]);
 });
