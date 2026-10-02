@@ -38,7 +38,7 @@ test("normalizes DualSubs AI settings and keeps secrets opaque", () => {
     ai_enabled: "true",
     concurrency: "20"
   });
-  assert.equal(Core.VERSION, "0.6.0");
+  assert.equal(Core.VERSION, "0.6.1");
   assert.equal(config.provider, "OpenAI-Compatible");
   assert.equal(config.apiKey, "secret-value");
   assert.equal(config.model, "deepseek-chat");
@@ -416,4 +416,15 @@ test("Claude request uses the Messages API with structured output", () => {
     () => Core.parseClaudeResponse(JSON.stringify({ stop_reason: "refusal", content: [] })),
     /declined/
   );
+});
+
+test("built-in prompt covers subtitle style without needing a custom prompt", () => {
+  const { system } = Core.buildPrompts([{ id: 0, text: "x" }], "en", "zh-Hans", "");
+  assert.match(system, /native speaker/);
+  assert.match(system, /brand and product names/);
+  assert.match(system, /misheard/);
+  assert.match(system, /\[Music\]/);
+  assert.match(system, /untrusted data/);
+  assert.doesNotMatch(system, /Additional user preference/);
+  assert.match(Core.buildPrompts([{ id: 0, text: "x" }], "en", "zh-Hans", "人名保留英文").system, /Additional user preference: 人名保留英文/);
 });

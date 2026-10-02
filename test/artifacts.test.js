@@ -47,7 +47,7 @@ test("existing public subscription filenames remain valid and use the new runtim
 
   assert.equal(legacyRemotePlugin, remotePlugin);
   assert.equal(legacyLocalPlugin, localPlugin);
-  assert.match(remotePlugin, /^#!version = 0\.6\.0$/m);
+  assert.match(remotePlugin, /^#!version = 0\.6\.1$/m);
   // 远程插件必须指向构建时记录的脚本地址（main 或测试分支）
   const manifest = JSON.parse(
     await readFile(path.join(projectRoot, "dist/manifest.json"), "utf8")

@@ -56,8 +56,8 @@
     try {
       $persistentStore?.write(String(now), NOTICE_KEY);
       $notification.post(
-        "DualSubs AI 字幕",
-        subtitle || "AI 未及时完成，已保留官方双语字幕",
+        "YouTube AI 双语字幕",
+        subtitle || "AI 翻译未完成，本次只显示原文字幕",
         message
       );
     } catch (_) {
@@ -433,6 +433,14 @@
 
   async function handleRequest() {
     const rewritten = Core.rewriteTimedTextRequest($request.url, config);
+    // 选了模型却没填那一家的 Key 时，字幕会只显示原文；提示一下，免得以为插件坏了
+    if (rewritten.reason === "missing-config" && config.aiEnabled) {
+      const provider = config.provider === "OpenAI-Compatible" ? "AI" : config.provider;
+      notifyFallback(
+        `已选择模型 ${config.model}，但还没填写 ${provider} API Key，本次只显示原文字幕。`,
+        "缺少 API Key"
+      );
+    }
     if (rewritten.changed) {
       log(
         "INFO",

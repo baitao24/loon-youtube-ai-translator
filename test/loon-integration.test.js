@@ -535,3 +535,29 @@ test("a model too slow for its batch size gets smaller batches next time", async
   assert.ok(sizes[0] < 15 && sizes[0] >= 8, `下次应缩小批次，实际 ${sizes[0]} 条`);
   assert.equal(second.doneValue.headers["x-dualsubs-ai-result"], "ai", "这次接口立即返回，小批次也能全部翻完");
 });
+
+test("a model without its provider key shows a hint instead of failing silently", async () => {
+  const notes = [];
+  const result = await runLoon({
+    argument: { ...config(), model: "deepseek-flash", api_key: "gemini-key" },
+    request: { url: "https://www.youtube.com/api/timedtext?v=abc&lang=en&tlang=zh-Hans&fmt=json3", method: "GET", headers: {} },
+    notification: { post: (...parts) => notes.push(parts.join(" | ")) }
+  });
+  const url = new URL(result.doneValue.url);
+  assert.equal(url.searchParams.has("tlang"), false);
+  assert.equal(url.searchParams.has("dsai"), false);
+  assert.equal(notes.length, 1);
+  assert.match(notes[0], /deepseek-flash/);
+  assert.match(notes[0], /DeepSeek API Key/);
+});
+
+test("turning AI off leaves the subtitle request unmarked and shows no hint", async () => {
+  const notes = [];
+  const result = await runLoon({
+    argument: { ...config(), ai_enabled: false },
+    request: { url: "https://www.youtube.com/api/timedtext?v=abc&lang=en&fmt=json3", method: "GET", headers: {} },
+    notification: { post: (...parts) => notes.push(parts.join(" | ")) }
+  });
+  assert.equal(JSON.stringify(result.doneValue), "{}");
+  assert.equal(notes.length, 0);
+});
