@@ -1,4 +1,4 @@
-// YouTube AI bilingual subtitles for Loon v0.9.0
+// YouTube AI bilingual subtitles for Loon v0.9.1
 // Translates the source timedtext response with Gemini; untranslated rows stay as source text.
 // Only intercepts /api/timedtext so it can run alongside YouTube ad-block plugins.
 // Never logs API keys or full subtitle payloads.
@@ -9,7 +9,7 @@
 })(typeof globalThis === "object" ? globalThis : this, function createYouTubeAICore() {
   "use strict";
 
-  const VERSION = "0.9.0";
+  const VERSION = "0.9.1";
   const QUERY_FLAG = "dsai";
   // 不能用 "tlang"：2026-10 起 YouTube 对带 tlang 的 timedtext 请求一律返回 429。
   const QUERY_TARGET = "dsai_target";
@@ -1140,6 +1140,7 @@
     typeof $response === "undefined" &&
     /^https?:\/\/s\.youtube\.com\/api\/stats\//.test(String((typeof $request === "undefined" ? null : $request)?.url || ""));
   const BACKGROUND_BUDGET_MS = 20000;
+  const BACKGROUND_REQUEST_TIMEOUT_MS = 15000;
   const executionDeadline =
     Date.now() + (isBackgroundPing ? BACKGROUND_BUDGET_MS : Math.min(config.maxWaitMs, CLIENT_SAFE_MAX_WAIT_MS));
   // 没翻完的视频的后台任务：全部原文 + 缓存键；只保留最近 2 个，3 小时后作废
@@ -1309,8 +1310,10 @@
     if (remaining <= 700) {
       throw new Error("AI translation exceeded the subtitle deadline");
     }
+    // 开字幕时要赶 App 约 7 秒的等待，单次请求最多 5.2 秒；后台续翻没人在等，慢模型可以等到 15 秒
+    const cap = isBackgroundPing ? BACKGROUND_REQUEST_TIMEOUT_MS : config.timeoutMs;
     return Object.assign({}, config, {
-      timeoutMs: Math.min(config.timeoutMs, Math.max(500, remaining - 350))
+      timeoutMs: Math.min(cap, Math.max(500, remaining - 350))
     });
   }
 

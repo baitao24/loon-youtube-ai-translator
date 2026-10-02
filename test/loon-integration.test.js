@@ -880,3 +880,26 @@ test("turning background translation off saves no job", async () => {
   assert.equal(store.get("@DualSubs-AI.BackgroundJobs.v1"), undefined);
   assert.match(notes[0], /重新打开这个视频时会接着翻译/);
 });
+
+test("background translation waits longer per request, so slow models still make progress", async () => {
+  const store = new Map();
+  await slowFirstOpen(store, [], "slowbg");
+  const started = Date.now();
+  const ping = await runLoon({
+    argument: config(),
+    request: { url: pingUrl("slowbg"), method: "POST", headers: {} },
+    store,
+    doneTimeoutMs: 15000,
+    httpClient: {
+      get: noGet,
+      post(request, callback) {
+        const ids = requestedIds(request);
+        // 慢模型：一批要 6 秒，超过开字幕时 5.2 秒的单次上限
+        setTimeout(() => callback(null, { status: 200 }, geminiRows(ids.map((id) => ({ id, text: `AI${id}` })))), 6000);
+      }
+    }
+  });
+  assert.equal(JSON.stringify(ping.doneValue), "{}");
+  assert.ok(Date.now() - started >= 6000);
+  assert.equal(JSON.parse(store.get("@DualSubs-AI.BackgroundJobs.v1")).slowbg, undefined, "后台应翻完并删除任务");
+});
