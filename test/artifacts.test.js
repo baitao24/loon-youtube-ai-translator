@@ -47,7 +47,7 @@ test("existing public subscription filenames remain valid and use the new runtim
 
   assert.equal(legacyRemotePlugin, remotePlugin);
   assert.equal(legacyLocalPlugin, localPlugin);
-  assert.match(remotePlugin, /^#!version = 0\.9\.3$/m);
+  assert.match(remotePlugin, /^#!version = 0\.9\.4$/m);
   // 远程插件必须指向构建时记录的脚本地址（main 或测试分支）
   const manifest = JSON.parse(
     await readFile(path.join(projectRoot, "dist/manifest.json"), "utf8")
@@ -91,7 +91,9 @@ test("local plugin pins DualSubs, exposes AI settings, and has no template marke
   assert.doesNotMatch(plugin, /\{\{SCRIPT_URL\}\}/);
   assert.match(plugin, /script-path=dualsubs-ai\.bundle\.js/);
   // 0.5.1：只拦截字幕接口，不和 YouTube 去广告插件抢 player / get_watch 等接口
-  assert.doesNotMatch(plugin, /youtubei|DualSubs\/YouTube\/releases/);
+  assert.doesNotMatch(plugin, /DualSubs\/YouTube\/releases/);
+  // 脚本只拦截字幕和观看统计，不拦截去广告插件处理的 youtubei 接口（QUIC 拒绝规则里提到该域名不算拦截）
+  assert.ok(scriptLines.every((line) => !/youtubei/.test(line)), scriptLines.join("\n"));
   assert.deepEqual(
     scriptLines.map((line) => line.split(" ")[1]),
     [
@@ -105,6 +107,13 @@ test("local plugin pins DualSubs, exposes AI settings, and has no template marke
   const statsRule = new RegExp(scriptLines[2].split(" ")[1]);
   assert.ok(statsRule.test("https://s.youtube.com/api/stats/watchtime?docid=abc&cpn=x"));
   assert.ok(!statsRule.test("https://s.youtube.com/api/stats/ads?ver=2"));
+  // 只拒绝 YouTube 相关域名的 QUIC，格式按 Loon 文档：协议规则 + AND 逻辑规则
+  const rules = plugin.split("[Rule]")[1].split("[Script]")[0].split("\n").filter((line) => line && !line.startsWith("#"));
+  assert.deepEqual(rules, [
+    "AND,((PROTOCOL,QUIC),(DOMAIN-SUFFIX,youtube.com)),REJECT",
+    "AND,((PROTOCOL,QUIC),(DOMAIN-SUFFIX,googlevideo.com)),REJECT",
+    "AND,((PROTOCOL,QUIC),(DOMAIN,youtubei.googleapis.com)),REJECT"
+  ]);
   // 0.5：只保留真正有用的设置项，模型和语言都是下拉选择
   assert.deepEqual([...definitions].sort(), [
     "LogLevel",
@@ -129,7 +138,10 @@ test("local plugin pins DualSubs, exposes AI settings, and has no template marke
   }
   assert.match(plugin, /^target_language = select,"简体中文",/m);
   assert.match(plugin, /^Position = select,"原文在上","译文在上"/m);
-  assert.doesNotMatch(plugin, /subtype=Official|tlang=|googlevideo/);
+  assert.doesNotMatch(plugin, /subtype=Official|tlang=/);
+  // 不解密视频流量：MITM 和脚本里都不能有 googlevideo（QUIC 拒绝规则里提到该域名不需要解密）
+  assert.doesNotMatch(plugin.split("[MITM]")[1], /googlevideo/);
+  assert.ok(scriptLines.every((line) => !/googlevideo/.test(line)));
   const timedTextResponseRule = plugin
     .split("\n")
     .find(

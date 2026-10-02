@@ -1,4 +1,4 @@
-// YouTube AI bilingual subtitles for Loon v0.9.3
+// YouTube AI bilingual subtitles for Loon v0.9.4
 // Translates the source timedtext response with Gemini; untranslated rows stay as source text.
 // Only intercepts /api/timedtext so it can run alongside YouTube ad-block plugins.
 // Never logs API keys or full subtitle payloads.
@@ -9,7 +9,7 @@
 })(typeof globalThis === "object" ? globalThis : this, function createYouTubeAICore() {
   "use strict";
 
-  const VERSION = "0.9.3";
+  const VERSION = "0.9.4";
   const QUERY_FLAG = "dsai";
   // 不能用 "tlang"：2026-10 起 YouTube 对带 tlang 的 timedtext 请求一律返回 429。
   const QUERY_TARGET = "dsai_target";
@@ -1853,7 +1853,17 @@
           `of ${plan.size} via ${config.provider} ${config.model}`
       );
       const outcome = batches.length
-        ? await translateWithinDeadline(batches, languages, plan.expectedMs)
+        ? await translateWithinDeadline(batches, languages, plan.expectedMs, {
+            // 用户已切到别的视频（有更新的字幕请求）时，这个视频不再发新批次，把名额让给新视频和去广告插件
+            shouldStop: () => {
+              const latest = Number((typeof $persistentStore === "undefined" ? 0 : $persistentStore.read(FOREGROUND_KEY)) || 0);
+              if (latest > scriptStartedAt) {
+                log("INFO", "A newer subtitle load started; this video stops sending new batches");
+                return true;
+              }
+              return false;
+            }
+          })
         : { rows: [], failures: [], launched: 0, retried: 0, samples: [] };
       recordSpeed(outcome.samples);
       outcome.rows.forEach((row) => known.set(String(row.id), row.text));

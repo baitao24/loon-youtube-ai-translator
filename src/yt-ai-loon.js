@@ -746,7 +746,17 @@
           `of ${plan.size} via ${config.provider} ${config.model}`
       );
       const outcome = batches.length
-        ? await translateWithinDeadline(batches, languages, plan.expectedMs)
+        ? await translateWithinDeadline(batches, languages, plan.expectedMs, {
+            // 用户已切到别的视频（有更新的字幕请求）时，这个视频不再发新批次，把名额让给新视频和去广告插件
+            shouldStop: () => {
+              const latest = Number((typeof $persistentStore === "undefined" ? 0 : $persistentStore.read(FOREGROUND_KEY)) || 0);
+              if (latest > scriptStartedAt) {
+                log("INFO", "A newer subtitle load started; this video stops sending new batches");
+                return true;
+              }
+              return false;
+            }
+          })
         : { rows: [], failures: [], launched: 0, retried: 0, samples: [] };
       recordSpeed(outcome.samples);
       outcome.rows.forEach((row) => known.set(String(row.id), row.text));

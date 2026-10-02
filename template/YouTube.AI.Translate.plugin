@@ -23,6 +23,13 @@ sentence_split = switch,true,tag=按句断句,desc=自动字幕常把上一句�
 custom_prompt = input,"",tag=额外翻译要求,desc=例如：人名保留英文；科技术语按业内习惯翻译。不要在这里填写密钥
 LogLevel = select,"INFO","DEBUG","WARN","ERROR","OFF",tag=日志等级,desc=排查问题时看 Loon 脚本日志；日志不记录 API Key 和字幕全文
 
+[Rule]
+# YouTube 走 QUIC（UDP）时 Loon 无法解密，字幕、观看统计和去广告脚本都会被绕过。
+# 只拒绝 YouTube 相关域名的 QUIC，App 会自动改走 TCP；其他 App 不受影响
+AND,((PROTOCOL,QUIC),(DOMAIN-SUFFIX,youtube.com)),REJECT
+AND,((PROTOCOL,QUIC),(DOMAIN-SUFFIX,googlevideo.com)),REJECT
+AND,((PROTOCOL,QUIC),(DOMAIN,youtubei.googleapis.com)),REJECT
+
 [Script]
 # 只拦截字幕接口（/api/timedtext），不碰 player、get_watch 等播放信息接口，
 # 避免和 YouTube 去广告插件处理同一个请求导致去广告失效

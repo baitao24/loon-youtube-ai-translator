@@ -6,7 +6,7 @@
 #!system = iOS,iPadOS,macOS
 #!system_version = 15
 #!loon_version = 3.4.0(962)
-#!version = 0.9.3
+#!version = 0.9.4
 
 [Argument]
 ai_enabled = switch,true,tag=AI 翻译,desc=关闭后不做翻译，只显示 YouTube 原文字幕
@@ -22,6 +22,13 @@ background_translate = switch,true,tag=播放时后台续翻,desc=长视频第�
 sentence_split = switch,true,tag=按句断句,desc=自动字幕常把上一句结尾和下一句开头放在同一条里。开启后按句子重新分条，原文和译文都更通顺；没有标点的字幕保持原样。显示时间按语速估算，如有异常可关闭
 custom_prompt = input,"",tag=额外翻译要求,desc=例如：人名保留英文；科技术语按业内习惯翻译。不要在这里填写密钥
 LogLevel = select,"INFO","DEBUG","WARN","ERROR","OFF",tag=日志等级,desc=排查问题时看 Loon 脚本日志；日志不记录 API Key 和字幕全文
+
+[Rule]
+# YouTube 走 QUIC（UDP）时 Loon 无法解密，字幕、观看统计和去广告脚本都会被绕过。
+# 只拒绝 YouTube 相关域名的 QUIC，App 会自动改走 TCP；其他 App 不受影响
+AND,((PROTOCOL,QUIC),(DOMAIN-SUFFIX,youtube.com)),REJECT
+AND,((PROTOCOL,QUIC),(DOMAIN-SUFFIX,googlevideo.com)),REJECT
+AND,((PROTOCOL,QUIC),(DOMAIN,youtubei.googleapis.com)),REJECT
 
 [Script]
 # 只拦截字幕接口（/api/timedtext），不碰 player、get_watch 等播放信息接口，

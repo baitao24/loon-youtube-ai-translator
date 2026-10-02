@@ -18,6 +18,10 @@
 
 可以和 YouTube 去广告插件一起用：本插件只拦截字幕接口 `/api/timedtext`，不碰 `player`、`get_watch` 等去广告插件需要处理的接口。
 
+插件还带了三条规则，拒绝 YouTube 相关域名（`youtube.com`、`googlevideo.com`、`youtubei.googleapis.com`）的 QUIC 连接。YouTube 走 QUIC 时 Loon 无法解密，字幕、观看统计和去广告脚本都会被绕过，表现为偶尔只有英文字幕或偶尔漏广告。被拒后 App 会自动改走普通连接，其他 App 不受影响。
+
+切换视频时，前一个视频还没发出的翻译请求会立即停止，后台续翻也会让路 30 秒，把 Loon 的处理能力留给新视频和去广告插件。
+
 ## 设置项
 
 | 设置 | 说明 |

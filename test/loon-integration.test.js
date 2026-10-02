@@ -1040,3 +1040,30 @@ test("background translation uses at most 3 requests at a time and yields to a n
   assert.equal(calls, 3, "检测到新的字幕加载后不再发第 4 批");
   assert.equal(JSON.parse(store.get("@DualSubs-AI.BackgroundJobs.v1")).polite.remaining, 5);
 });
+
+test("switching to another video stops the previous video from sending new batches", async () => {
+  const store = new Map();
+  let calls = 0;
+  const lines = [];
+  const result = await runLoon({
+    argument: { ...config(), parallel: "2", batch_size: "5", max_wait_ms: "3000", timeout_ms: "3000", LogLevel: "INFO" },
+    request: { url: processedUrl("json3", "switched"), method: "GET", headers: {} },
+    response: { status: 200, headers: { "Content-Type": "application/json" }, body: manyCueJson3(30) },
+    store,
+    console: { log: (line) => lines.push(line) },
+    doneTimeoutMs: 4500,
+    httpClient: {
+      get: noGet,
+      post(request, callback) {
+        calls += 1;
+        // 第 2 个请求发出时，用户切到了别的视频（新的字幕请求）
+        if (calls === 2) store.set("@DualSubs-AI.LastSubtitleLoad.v1", String(Date.now() + 50));
+        const ids = requestedIds(request);
+        setTimeout(() => callback(null, { status: 200 }, geminiRows(ids.map((id) => ({ id, text: `AI${id}` })))), 200);
+      }
+    }
+  });
+  assert.equal(calls, 2, "切换后不再发新批次（6 批只发了 2 批）");
+  assert.ok(lines.some((line) => /newer subtitle load/.test(line)));
+  assert.equal(result.doneValue.headers["x-dualsubs-ai-result"], "ai-partial");
+});
