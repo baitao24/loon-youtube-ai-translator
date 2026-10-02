@@ -5,7 +5,7 @@
 })(typeof globalThis === "object" ? globalThis : this, function createYouTubeAICore() {
   "use strict";
 
-  const VERSION = "0.8.0";
+  const VERSION = "0.9.0";
   const QUERY_FLAG = "dsai";
   // 不能用 "tlang"：2026-10 起 YouTube 对带 tlang 的 timedtext 请求一律返回 429。
   const QUERY_TARGET = "dsai_target";
@@ -160,6 +160,7 @@
         DEFAULTS.autoTranslate
       ),
       sentenceSplit: toBoolean(raw.sentence_split ?? raw.sentenceSplit, true),
+      backgroundTranslate: toBoolean(raw.background_translate ?? raw.backgroundTranslate, true),
       showOnly: toBoolean(
         raw.show_only ?? raw.showOnly ?? raw.ShowOnly,
         DEFAULTS.showOnly

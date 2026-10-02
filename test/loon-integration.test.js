@@ -781,3 +781,102 @@ test("a model that still answers in JSON is understood through the fallback", as
   assert.equal(JSON.parse(result.doneValue.body).events[1].segs[0].utf8, "AI世界\nWorld");
   assert.equal(result.doneValue.headers["x-dualsubs-ai-result"], "ai");
 });
+
+function pingUrl(video, endpoint = "watchtime") {
+  return `https://s.youtube.com/api/stats/${endpoint}?ns=yt&docid=${video}&cpn=abc&st=12`;
+}
+
+function slowFirstOpen(store, notes, video, extraArgs) {
+  return runLoon({
+    argument: { ...config(), parallel: "2", batch_size: "5", max_wait_ms: "3000", timeout_ms: "3000", ...extraArgs },
+    request: { url: processedUrl("json3", video), method: "GET", headers: {} },
+    response: { status: 200, headers: { "Content-Type": "application/json" }, body: tenCueJson3("Line ") },
+    store,
+    notification: { post: (...parts) => notes.push(parts.join(" | ")) },
+    doneTimeoutMs: 4500,
+    httpClient: {
+      get: noGet,
+      post(request, callback) {
+        const ids = requestedIds(request);
+        // 第一次开字幕只来得及翻第一批
+        if (ids[0] === 0) callback(null, { status: 200 }, geminiRows(ids.map((id) => ({ id, text: `AI${id}` }))));
+      }
+    }
+  });
+}
+
+test("playback pings finish a long video in the background; reopening shows it all", async () => {
+  const store = new Map();
+  const notes = [];
+  const first = await slowFirstOpen(store, notes, "bgvideo");
+  assert.equal(first.doneValue.headers["x-dualsubs-ai-result"], "ai-partial");
+  const jobs = JSON.parse(store.get("@DualSubs-AI.BackgroundJobs.v1"));
+  assert.equal(jobs.bgvideo.remaining, 5);
+  assert.equal(jobs.bgvideo.cues.length, 10);
+  assert.match(notes[0], /后台接着翻/);
+
+  const translated = [];
+  const ping = await runLoon({
+    argument: config(),
+    request: { url: pingUrl("bgvideo"), method: "POST", headers: {} },
+    store,
+    notification: { post: (...parts) => notes.push(parts.join(" | ")) },
+    httpClient: {
+      get: noGet,
+      post(request, callback) {
+        const ids = requestedIds(request);
+        translated.push(...ids);
+        callback(null, { status: 200 }, geminiRows(ids.map((id) => ({ id, text: `AI${id}` }))));
+      }
+    }
+  });
+  assert.equal(JSON.stringify(ping.doneValue), "{}", "统计请求原样放行");
+  assert.deepEqual(translated, [5, 6, 7, 8, 9], "后台只翻剩下的行");
+  assert.equal(JSON.parse(store.get("@DualSubs-AI.BackgroundJobs.v1")).bgvideo, undefined, "翻完后任务删除");
+  assert.match(notes[notes.length - 1], /后台翻译完成/);
+
+  const reopened = await runLoon({
+    argument: config(),
+    request: { url: processedUrl("json3", "bgvideo"), method: "GET", headers: {} },
+    response: { status: 200, headers: { "Content-Type": "application/json" }, body: tenCueJson3("Line ") },
+    store,
+    httpClient: { get: noGet, post: () => assert.fail("重新打开时不应再调用 AI") }
+  });
+  assert.equal(reopened.doneValue.headers["x-dualsubs-ai-result"], "ai");
+  const events = JSON.parse(reopened.doneValue.body).events.map((event) => event.segs[0].utf8);
+  assert.deepEqual(events, Array.from({ length: 10 }, (_, i) => `AI${i}\nLine ${i}`));
+});
+
+test("pings for videos without a background job pass straight through", async () => {
+  const lines = [];
+  const result = await runLoon({
+    argument: { ...config(), LogLevel: "INFO" },
+    request: { url: pingUrl("nojob", "qoe"), method: "POST", headers: {} },
+    console: { log: (line) => lines.push(line) },
+    httpClient: { get: noGet, post: () => assert.fail("没有任务时不应调用 AI") }
+  });
+  assert.equal(JSON.stringify(result.doneValue), "{}");
+  assert.ok(lines.some((line) => /Playback ping qoe for nojob; background job: none/.test(line)), lines.join("\n"));
+});
+
+test("only one background translation runs at a time", async () => {
+  const store = new Map();
+  await slowFirstOpen(store, [], "locked");
+  store.set("@DualSubs-AI.BackgroundLock.v1", JSON.stringify({ video: "other", until: Date.now() + 10000 }));
+  const result = await runLoon({
+    argument: config(),
+    request: { url: pingUrl("locked"), method: "POST", headers: {} },
+    store,
+    httpClient: { get: noGet, post: () => assert.fail("已有后台任务在跑时不应再翻") }
+  });
+  assert.equal(JSON.stringify(result.doneValue), "{}");
+  assert.equal(JSON.parse(store.get("@DualSubs-AI.BackgroundJobs.v1")).locked.remaining, 5);
+});
+
+test("turning background translation off saves no job", async () => {
+  const store = new Map();
+  const notes = [];
+  await slowFirstOpen(store, notes, "nobg", { background_translate: false });
+  assert.equal(store.get("@DualSubs-AI.BackgroundJobs.v1"), undefined);
+  assert.match(notes[0], /重新打开这个视频时会接着翻译/);
+});

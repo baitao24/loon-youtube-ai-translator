@@ -47,7 +47,7 @@ test("existing public subscription filenames remain valid and use the new runtim
 
   assert.equal(legacyRemotePlugin, remotePlugin);
   assert.equal(legacyLocalPlugin, localPlugin);
-  assert.match(remotePlugin, /^#!version = 0\.8\.0$/m);
+  assert.match(remotePlugin, /^#!version = 0\.9\.0$/m);
   // 远程插件必须指向构建时记录的脚本地址（main 或测试分支）
   const manifest = JSON.parse(
     await readFile(path.join(projectRoot, "dist/manifest.json"), "utf8")
@@ -96,10 +96,15 @@ test("local plugin pins DualSubs, exposes AI settings, and has no template marke
     scriptLines.map((line) => line.split(" ")[1]),
     [
       "^https?:\\/\\/(www|m)\\.youtube\\.com\\/api\\/timedtext(\\?.+)?$",
-      "^https?:\\/\\/(www|m)\\.youtube\\.com\\/api\\/timedtext(\\?.+)?$"
+      "^https?:\\/\\/(www|m)\\.youtube\\.com\\/api\\/timedtext(\\?.+)?$",
+      "^https?:\\/\\/s\\.youtube\\.com\\/api\\/stats\\/(watchtime|qoe|playback)(\\?.*)?$"
     ]
   );
-  assert.match(plugin, /^hostname = www\.youtube\.com, m\.youtube\.com$/m);
+  assert.match(plugin, /^hostname = www\.youtube\.com, m\.youtube\.com, s\.youtube\.com$/m);
+  // 后台续翻只借观看统计请求，不能碰去广告插件拦截的 stats/ads
+  const statsRule = new RegExp(scriptLines[2].split(" ")[1]);
+  assert.ok(statsRule.test("https://s.youtube.com/api/stats/watchtime?docid=abc&cpn=x"));
+  assert.ok(!statsRule.test("https://s.youtube.com/api/stats/ads?ver=2"));
   // 0.5：只保留真正有用的设置项，模型和语言都是下拉选择
   assert.deepEqual([...definitions].sort(), [
     "LogLevel",
@@ -107,6 +112,7 @@ test("local plugin pins DualSubs, exposes AI settings, and has no template marke
     "ShowOnly",
     "ai_enabled",
     "api_key",
+    "background_translate",
     "claude_api_key",
     "custom_prompt",
     "deepseek_api_key",

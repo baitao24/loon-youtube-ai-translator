@@ -1,4 +1,4 @@
-// YouTube AI bilingual subtitles for Loon v0.8.0
+// YouTube AI bilingual subtitles for Loon v0.9.0
 // Translates the source timedtext response with Gemini; untranslated rows stay as source text.
 // Only intercepts /api/timedtext so it can run alongside YouTube ad-block plugins.
 // Never logs API keys or full subtitle payloads.
@@ -9,7 +9,7 @@
 })(typeof globalThis === "object" ? globalThis : this, function createYouTubeAICore() {
   "use strict";
 
-  const VERSION = "0.8.0";
+  const VERSION = "0.9.0";
   const QUERY_FLAG = "dsai";
   // 不能用 "tlang"：2026-10 起 YouTube 对带 tlang 的 timedtext 请求一律返回 429。
   const QUERY_TARGET = "dsai_target";
@@ -164,6 +164,7 @@
         DEFAULTS.autoTranslate
       ),
       sentenceSplit: toBoolean(raw.sentence_split ?? raw.sentenceSplit, true),
+      backgroundTranslate: toBoolean(raw.background_translate ?? raw.backgroundTranslate, true),
       showOnly: toBoolean(
         raw.show_only ?? raw.showOnly ?? raw.ShowOnly,
         DEFAULTS.showOnly
@@ -1134,8 +1135,18 @@
     typeof $argument === "undefined" ? {} : $argument
   );
   const scriptStartedAt = Date.now();
+  // 播放时 App 定期发送的观看统计请求：没人在等它返回，可以借来在后台继续翻
+  const isBackgroundPing =
+    typeof $response === "undefined" &&
+    /^https?:\/\/s\.youtube\.com\/api\/stats\//.test(String((typeof $request === "undefined" ? null : $request)?.url || ""));
+  const BACKGROUND_BUDGET_MS = 20000;
   const executionDeadline =
-    Date.now() + Math.min(config.maxWaitMs, CLIENT_SAFE_MAX_WAIT_MS);
+    Date.now() + (isBackgroundPing ? BACKGROUND_BUDGET_MS : Math.min(config.maxWaitMs, CLIENT_SAFE_MAX_WAIT_MS));
+  // 没翻完的视频的后台任务：全部原文 + 缓存键；只保留最近 2 个，3 小时后作废
+  const JOB_KEY = "@DualSubs-AI.BackgroundJobs.v1";
+  const LOCK_KEY = "@DualSubs-AI.BackgroundLock.v1";
+  const JOB_LIMIT = 2;
+  const JOB_TTL_MS = 3 * 3600 * 1000;
 
   function log(level, message) {
     if ((LOG_LEVELS[level] || 20) < (LOG_LEVELS[config.logLevel] || 20)) return;
@@ -1605,6 +1616,94 @@
     }
   }
 
+  function saveJob(videoId, job) {
+    if (!videoId) return false;
+    const jobs = readJsonStore(JOB_KEY, {});
+    jobs[videoId] = job;
+    const recent = Object.keys(jobs)
+      .sort((a, b) => (jobs[b].createdAt || 0) - (jobs[a].createdAt || 0))
+      .slice(0, JOB_LIMIT);
+    const payload = JSON.stringify(Object.fromEntries(recent.map((key) => [key, jobs[key]])));
+    try {
+      if (typeof $persistentStore === "undefined") return false;
+      const saved = $persistentStore.write(payload, JOB_KEY);
+      if (saved === false) {
+        log("WARN", `Background job save failed (${payload.length} chars)`);
+        return false;
+      }
+      log("INFO", `Background job saved for ${videoId}: ${job.remaining} rows left`);
+      return true;
+    } catch (error) {
+      log("WARN", `Background job save skipped: ${safeError(error)}`);
+      return false;
+    }
+  }
+
+  function removeJob(videoId) {
+    const jobs = readJsonStore(JOB_KEY, {});
+    if (!videoId || !jobs[videoId]) return;
+    delete jobs[videoId];
+    writeJsonStore(JOB_KEY, jobs);
+  }
+
+  async function handleBackgroundPing() {
+    const url = $request.url;
+    const endpoint = (url.match(/\/api\/stats\/(\w+)/) || [])[1] || "?";
+    const videoId = decodeURIComponent((url.match(/[?&]docid=([^&]+)/) || [])[1] || "");
+    const jobs = readJsonStore(JOB_KEY, {});
+    const job = jobs[videoId];
+    // 每次都记一条，方便确认 App 是否真的发了这类请求
+    log("INFO", `Playback ping ${endpoint} for ${videoId || "?"}; background job: ${job ? `${job.remaining} rows left` : "none"}`);
+    if (!job || !config.backgroundTranslate || !config.aiEnabled || !Core.isConfigured(config)) return;
+    if (Date.now() - (job.createdAt || 0) > JOB_TTL_MS) {
+      removeJob(videoId);
+      return;
+    }
+    const lock = readJsonStore(LOCK_KEY, {});
+    if (lock.until > Date.now()) {
+      log("DEBUG", `Background translation already running for ${lock.video}`);
+      return;
+    }
+    writeJsonStore(LOCK_KEY, { video: videoId, until: Date.now() + BACKGROUND_BUDGET_MS + 5000 });
+    try {
+      const known = readRows(job.key);
+      const pending = job.cues.filter((cue) => !known.has(String(cue.id)));
+      if (pending.length) {
+        const plan = batchPlan();
+        const batches = attachContext(Core.chunkCues(pending, plan.size, config.maxBatchChars), job.cues);
+        const rememberedThinking = readJsonStore(THINKING_KEY, {})[config.model];
+        if (config.provider === "Gemini" && rememberedThinking) config.thinkingLevel = rememberedThinking;
+        const outcome = await translateWithinDeadline(batches, job.languages, plan.expectedMs);
+        recordSpeed(outcome.samples);
+        outcome.rows.forEach((row) => known.set(String(row.id), row.text));
+        if (outcome.rows.length) writeRows(job.key, known);
+        log(
+          "INFO",
+          `Background translated ${outcome.rows.length} rows for ${videoId}, failed batches ${outcome.failures.length}` +
+            (outcome.failures.length ? `, first failure: ${safeError(outcome.failures[0])}` : "")
+        );
+      }
+      const left = job.cues.filter((cue) => !known.has(String(cue.id))).length;
+      if (left === 0) {
+        removeJob(videoId);
+        log("INFO", `Background translation finished for ${videoId}`);
+        notifyFallback(
+          "这个视频的字幕已经全部翻好。退出视频再重新打开，就能看到完整的双语字幕。",
+          "后台翻译完成",
+          { key: `done:${videoId}`, intervalMs: 3600000 }
+        );
+      } else {
+        const latest = readJsonStore(JOB_KEY, {});
+        if (latest[videoId]) {
+          latest[videoId].remaining = left;
+          writeJsonStore(JOB_KEY, latest);
+        }
+      }
+    } finally {
+      writeJsonStore(LOCK_KEY, {});
+    }
+  }
+
   function subtitleContentType(document) {
     return document.format === "srv3"
       ? "application/xml; charset=utf-8"
@@ -1729,13 +1828,24 @@
           `${Date.now() - scriptStartedAt}ms` +
           (outcome.failures.length ? `, first failure: ${safeError(outcome.failures[0])}` : "")
       );
+      const videoId = videoIdOf($request.url);
       if (complete) {
         writeCache(responseCacheKey, { body: aiBody, contentType, result: "ai" }, 86400000);
+        removeJob(videoId);
       } else {
+        const background = config.backgroundTranslate && saveJob(videoId, {
+          key: rowsKey,
+          languages,
+          cues: sourceDocument.cues.map(({ id, text }) => ({ id, text })),
+          remaining: sourceDocument.cues.length - aiRows.length,
+          createdAt: Date.now()
+        });
         notifyFallback(
-          `已用 AI 翻译 ${percent}%，其余暂时只显示原文。翻好的部分已保存，重新打开这个视频时会接着翻译剩下的部分。`,
+          background
+            ? `已用 AI 翻译 ${percent}%，其余暂时只显示原文。看视频时会在后台接着翻，翻完会通知你，之后重新打开这个视频即可看到完整双语字幕。`
+            : `已用 AI 翻译 ${percent}%，其余暂时只显示原文。翻好的部分已保存，重新打开这个视频时会接着翻译剩下的部分。`,
           "AI 字幕部分完成",
-          { key: `partial:${videoIdOf($request.url)}`, intervalMs: 30000 }
+          { key: `partial:${videoId}`, intervalMs: 30000 }
         );
       }
       doneBody(aiBody, contentType, complete ? "ai" : "ai-partial", undefined, { noStore: !complete });
@@ -1748,12 +1858,15 @@
   }
 
   Promise.resolve()
-    .then(() =>
-      typeof $response === "undefined" ? handleRequest() : handleResponse()
-    )
+    .then(() => {
+      if (isBackgroundPing) return handleBackgroundPing().finally(() => $done({}));
+      return typeof $response === "undefined" ? handleRequest() : handleResponse();
+    })
     .catch((error) => {
       const message = safeError(error);
       log("ERROR", message);
+      // 后台续翻在 finally 里已经放行了统计请求，这里不能再调用一次 $done
+      if (isBackgroundPing) return;
       if (typeof $response === "undefined") doneRequest($request.url);
       else donePassthrough("source-only", message);
     });
