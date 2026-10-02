@@ -1,8 +1,8 @@
 {
   "name": "loon-youtube-ai-translator",
-  "version": "0.7.2",
+  "version": "0.7.3",
   "bundle": "dualsubs-ai.bundle.js",
-  "sha256": "02bccef2137729a1d2739748c891c97370203e98000400a4fdd051aea5359cc8",
+  "sha256": "64c9b3765e56010e09663f9b85bff2e52015cbade85258cffc53742309931d7c",
   "upstream": {
     "youtube": "v1.5.11",
     "universalReference": "v1.7.5"

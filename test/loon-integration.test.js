@@ -723,3 +723,35 @@ test("a failed row-cache write is logged instead of silently losing progress", a
   assert.ok(lines.some((line) => /Saved AI rows for this video: 0/.test(line)));
   assert.ok(lines.some((line) => /Row cache write failed/.test(line)), lines.join("\n"));
 });
+
+test("partial-translation notices are shown for each video, only deduplicated briefly", async () => {
+  const store = new Map();
+  const notes = [];
+  const run = (video) =>
+    runLoon({
+      argument: { ...config(), parallel: "2", batch_size: "5", max_wait_ms: "3000", timeout_ms: "3000" },
+      request: { url: processedUrl("json3", video), method: "GET", headers: {} },
+      response: { status: 200, headers: { "Content-Type": "application/json" }, body: tenCueJson3(`${video} `) },
+      store,
+      notification: { post: (...parts) => notes.push(parts.join(" | ")) },
+      doneTimeoutMs: 4500,
+      httpClient: {
+        get: noGet,
+        post(request, callback) {
+          const ids = requestedIds(request);
+          if (ids[0] === 0) callback(null, { status: 200 }, geminiRows(ids.map((id) => ({ id, text: `AI${id}` }))));
+        }
+      }
+    });
+  await run("videoA");
+  await run("videoB");
+  assert.equal(notes.length, 2, "不同视频都要通知");
+  await run("videoA");
+  assert.equal(notes.length, 2, "同一视频 30 秒内重复请求不重复通知");
+  // 模拟 30 秒后再次打开同一视频
+  const history = JSON.parse(store.get("@DualSubs-AI.Notices.v2"));
+  history["partial:videoA"] -= 31000;
+  store.set("@DualSubs-AI.Notices.v2", JSON.stringify(history));
+  await run("videoA");
+  assert.equal(notes.length, 3);
+});

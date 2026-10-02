@@ -3,7 +3,7 @@
 
   const Core = globalThis.YTAI;
   const CACHE_KEY = "@DualSubs-AI.Cache.v1";
-  const NOTICE_KEY = "@DualSubs-AI.LastNotice.v1";
+  const NOTICE_KEY = "@DualSubs-AI.Notices.v2";
   // 按视频保存已翻好的 AI 行；没翻完的视频下次请求字幕时只翻剩下的行。
   const ROWS_KEY = "@DualSubs-AI.Rows.v1";
   const ROWS_MAX_CHARS = 400000;
@@ -43,20 +43,30 @@
       .slice(0, 220);
   }
 
-  function notifyFallback(message, subtitle) {
+  // 不同类型的通知分开限频：部分翻译按视频只去重 30 秒（App 偶尔连发两次请求），
+  // 失败、缺 Key 这类重复性提示 5 分钟最多一次，避免刷屏
+  function notifyFallback(message, subtitle, options) {
     if (typeof $notification === "undefined" || typeof $notification.post !== "function") {
       return;
     }
+    const key = options?.key || "general";
+    const intervalMs = options?.intervalMs ?? 300000;
     const now = Date.now();
-    let previous = 0;
+    let history = {};
     try {
-      previous = Number($persistentStore?.read(NOTICE_KEY) || 0);
+      const parsed = JSON.parse($persistentStore?.read(NOTICE_KEY) || "{}");
+      history = parsed && typeof parsed === "object" ? parsed : {};
     } catch (_) {
-      previous = 0;
+      history = {};
     }
-    if (now - previous < 300000) return;
+    if (now - Number(history[key] || 0) < intervalMs) return;
     try {
-      $persistentStore?.write(String(now), NOTICE_KEY);
+      history[key] = now;
+      // 只保留最近 30 条记录
+      const recent = Object.keys(history)
+        .sort((a, b) => history[b] - history[a])
+        .slice(0, 30);
+      $persistentStore?.write(JSON.stringify(Object.fromEntries(recent.map((item) => [item, history[item]]))), NOTICE_KEY);
       $notification.post(
         "YouTube AI 双语字幕",
         subtitle || "AI 翻译未完成，本次只显示原文字幕",
@@ -69,6 +79,11 @@
 
   // 条件请求头：带上它们时 YouTube 可能回 304，App 就继续用它缓存的旧字幕
   const CONDITIONAL_REQUEST_HEADERS = /^(if-none-match|if-modified-since)$/i;
+
+  function videoIdOf(url) {
+    const match = String(url || "").match(/[?&]v=([^&]+)/);
+    return match ? match[1] : "";
+  }
 
   function sanitizedHeaders(contentType, result, error, options) {
     const headers = Object.assign({}, $response?.headers || {});
@@ -491,7 +506,8 @@
       const provider = config.provider === "OpenAI-Compatible" ? "AI" : config.provider;
       notifyFallback(
         `已选择模型 ${config.model}，但还没填写 ${provider} API Key，本次只显示原文字幕。`,
-        "缺少 API Key"
+        "缺少 API Key",
+        { key: "missing-key" }
       );
     }
     if (rewritten.changed) {
@@ -606,14 +622,15 @@
       } else {
         notifyFallback(
           `已用 AI 翻译 ${percent}%，其余暂时只显示原文。翻好的部分已保存，重新打开这个视频时会接着翻译剩下的部分。`,
-          "AI 字幕部分完成"
+          "AI 字幕部分完成",
+          { key: `partial:${videoIdOf($request.url)}`, intervalMs: 30000 }
         );
       }
       doneBody(aiBody, contentType, complete ? "ai" : "ai-partial", undefined, { noStore: !complete });
     } catch (error) {
       const message = safeError(error);
       log("WARN", `${message}; showing source subtitles`);
-      notifyFallback(message, "AI 翻译失败，本次只显示原文字幕");
+      notifyFallback(message, "AI 翻译失败，本次只显示原文字幕", { key: "failure" });
       donePassthrough("source-only", message);
     }
   }

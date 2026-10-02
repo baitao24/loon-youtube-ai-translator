@@ -1,6 +1,6 @@
 {
   "name": "loon-youtube-ai-translator",
-  "version": "0.7.2",
+  "version": "0.7.3",
   "private": true,
   "description": "Loon plugin: YouTube bilingual subtitles translated by Gemini within the player's subtitle deadline",
   "license": "MIT",
