@@ -47,7 +47,7 @@ test("existing public subscription filenames remain valid and use the new runtim
 
   assert.equal(legacyRemotePlugin, remotePlugin);
   assert.equal(legacyLocalPlugin, localPlugin);
-  assert.match(remotePlugin, /^#!version = 0\.5\.1$/m);
+  assert.match(remotePlugin, /^#!version = 0\.6\.0$/m);
   // 远程插件必须指向构建时记录的脚本地址（main 或测试分支）
   const manifest = JSON.parse(
     await readFile(path.join(projectRoot, "dist/manifest.json"), "utf8")
@@ -107,11 +107,19 @@ test("local plugin pins DualSubs, exposes AI settings, and has no template marke
     "ShowOnly",
     "ai_enabled",
     "api_key",
+    "claude_api_key",
     "custom_prompt",
+    "deepseek_api_key",
     "model",
+    "openai_api_key",
     "target_language"
   ]);
   assert.match(plugin, /^model = select,"gemini-3\.5-flash-lite",/m);
+  // 每家至少一个模型，且模型名都能推断出服务商
+  const models = plugin.match(/^model = select,(.*?),tag=/m)[1].split(",").map((item) => item.replace(/"/g, ""));
+  for (const prefix of ["gemini-", "deepseek-", "gpt-", "claude-"]) {
+    assert.ok(models.some((name) => name.startsWith(prefix)), `missing ${prefix} models`);
+  }
   assert.match(plugin, /^target_language = select,"简体中文",/m);
   assert.match(plugin, /^Position = select,"原文在上","译文在上"/m);
   assert.doesNotMatch(plugin, /subtype=Official|tlang=|googlevideo/);

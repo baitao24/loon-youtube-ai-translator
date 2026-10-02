@@ -5,7 +5,7 @@
 })(typeof globalThis === "object" ? globalThis : this, function createYouTubeAICore() {
   "use strict";
 
-  const VERSION = "0.5.1";
+  const VERSION = "0.6.0";
   const QUERY_FLAG = "dsai";
   // 不能用 "tlang"：2026-10 起 YouTube 对带 tlang 的 timedtext 请求一律返回 429。
   const QUERY_TARGET = "dsai_target";
@@ -15,7 +15,7 @@
     provider: "Gemini",
     aiEnabled: true,
     apiKey: "",
-    model: "gemini-3.6-flash",
+    model: "gemini-3.5-flash-lite",
     baseUrl: "https://api.openai.com/v1",
     geminiBaseUrl: "https://generativelanguage.googleapis.com/v1beta",
     targetLanguage: "zh-Hans",
@@ -76,6 +76,28 @@
     return result;
   }
 
+  // 服务商由模型名推断，每家用自己的 Key 输入框；切换模型不用重填 Key
+  const PROVIDERS = Object.freeze({
+    Gemini: { keyField: "api_key" },
+    OpenAI: { keyField: "openai_api_key", baseUrl: "https://api.openai.com/v1" },
+    DeepSeek: { keyField: "deepseek_api_key", baseUrl: "https://api.deepseek.com" },
+    Claude: { keyField: "claude_api_key", baseUrl: "https://api.anthropic.com/v1" }
+  });
+
+  function providerForModel(model) {
+    const name = String(model || "").toLowerCase();
+    if (name.startsWith("gemini")) return "Gemini";
+    if (name.startsWith("deepseek")) return "DeepSeek";
+    if (name.startsWith("claude")) return "Claude";
+    if (/^(gpt|o\d)/.test(name)) return "OpenAI";
+    return "";
+  }
+
+  // 没有实测速度前的初始批大小：轻量模型 30 条，其他模型先保守用 15 条
+  function initialBatchSize(model) {
+    return /lite|nano|haiku|deepseek-flash/i.test(String(model || "")) ? 30 : 15;
+  }
+
   // 插件里用中文显示语言名，这里换回语言代码
   const LANGUAGE_CODES = Object.freeze({
     简体中文: "zh-Hans",
@@ -95,8 +117,13 @@
       argument && typeof argument === "object" && !Array.isArray(argument)
         ? argument
         : parseArgumentString(argument);
-    const providerRaw = String(raw.provider || raw.Provider || DEFAULTS.provider).toLowerCase();
-    const provider = providerRaw.includes("gemini") ? "Gemini" : "OpenAI-Compatible";
+    const model = String(raw.model || raw.Model || DEFAULTS.model).trim();
+    const providerRaw = String(raw.provider || raw.Provider || "").toLowerCase();
+    const provider = providerRaw.includes("compatible")
+      ? "OpenAI-Compatible"
+      : providerForModel(model) || (providerRaw && !providerRaw.includes("gemini") ? "OpenAI-Compatible" : "Gemini");
+    const keyField = PROVIDERS[provider]?.keyField || "api_key";
+    const configuredBatch = raw.batch_size ?? raw.max_batch_items ?? raw.maxBatchItems;
     const positionRaw = String(raw.position || raw.Position || DEFAULTS.position).toLowerCase();
     const position =
       positionRaw.includes("source") || positionRaw === "forward" || positionRaw.includes("原文在上")
@@ -114,9 +141,14 @@
         raw.ai_enabled ?? raw.aiEnabled ?? raw.AIEnabled,
         DEFAULTS.aiEnabled
       ),
-      apiKey: String(raw.api_key || raw.apiKey || raw.APIKey || DEFAULTS.apiKey).trim(),
-      model: String(raw.model || raw.Model || DEFAULTS.model).trim(),
-      baseUrl: String(raw.base_url || raw.baseUrl || raw.BaseURL || DEFAULTS.baseUrl).trim(),
+      apiKey: String(
+        raw[keyField] || (keyField === "api_key" ? raw.apiKey || raw.APIKey : "") || DEFAULTS.apiKey
+      ).trim(),
+      model,
+      baseUrl: PROVIDERS[provider]?.baseUrl ||
+        String(raw.base_url || raw.baseUrl || raw.BaseURL || DEFAULTS.baseUrl).trim(),
+      // 插件没传批大小时按模型实测速度自动调整
+      adaptiveBatch: configuredBatch === undefined || configuredBatch === "",
       geminiBaseUrl: String(
         raw.gemini_base_url || raw.geminiBaseUrl || DEFAULTS.geminiBaseUrl
       ).trim(),
@@ -134,8 +166,8 @@
       position,
       customPrompt: String(raw.custom_prompt || raw.customPrompt || DEFAULTS.customPrompt).trim(),
       maxBatchItems: clampInteger(
-        raw.batch_size ?? raw.max_batch_items ?? raw.maxBatchItems,
-        DEFAULTS.maxBatchItems,
+        configuredBatch,
+        configuredBatch === undefined || configuredBatch === "" ? initialBatchSize(model) : DEFAULTS.maxBatchItems,
         5,
         400
       ),
@@ -172,7 +204,7 @@
         0,
         1000
       ),
-      thinkingLevel: ["off", "minimal", "low", "medium", "high"].includes(
+      thinkingLevel: ["off", "budget0", "minimal", "low", "medium", "high"].includes(
         String(raw.thinking_level || raw.thinkingLevel || DEFAULTS.thinkingLevel).toLowerCase()
       )
         ? String(
@@ -465,9 +497,17 @@
         { role: "system", content: prompts.system },
         { role: "user", content: prompts.user }
       ],
-      temperature: 0,
       stream: false
     };
+    if (config.provider === "OpenAI") {
+      // GPT-5.x 系列：关闭推理最快；这些模型不接受自定义 temperature
+      body.reasoning_effort = "none";
+    } else if (config.provider === "DeepSeek") {
+      // DeepSeek 默认开思考模式，字幕翻译要关掉，否则很慢
+      body.thinking = { type: "disabled" };
+    } else {
+      body.temperature = 0;
+    }
     if (useJsonMode) body.response_format = { type: "json_object" };
     return {
       url: normalizeOpenAIEndpoint(config.baseUrl),
@@ -510,8 +550,10 @@
             }
           }
         };
-    // 部分模型（如 2.5 系列）不接受 thinkingLevel，运行时遇到 400 会改成 off 重试
-    if (config.thinkingLevel !== "off") {
+    // 部分模型（如 2.5 系列）不接受 thinkingLevel，运行时遇到 400 会换成 thinkingBudget: 0 或 low 重试
+    if (config.thinkingLevel === "budget0") {
+      generationConfig.thinkingConfig = { thinkingBudget: 0 };
+    } else if (config.thinkingLevel !== "off") {
       generationConfig.thinkingConfig = { thinkingLevel: config.thinkingLevel };
     }
     return {
@@ -528,6 +570,69 @@
         generationConfig
       })
     };
+  }
+
+  function claudeSchema() {
+    return {
+      type: "object",
+      properties: {
+        translations: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: { id: { type: "integer" }, text: { type: "string" } },
+            required: ["id", "text"],
+            additionalProperties: false
+          }
+        }
+      },
+      required: ["translations"],
+      additionalProperties: false
+    };
+  }
+
+  // Claude Messages API（原生 HTTP；Loon 里没有 SDK）
+  function createClaudeRequest(config, batch, languages, useStructuredOutput) {
+    const prompts = buildPrompts(
+      batch,
+      languages.source,
+      languages.target,
+      config.customPrompt,
+      batch.context
+    );
+    const body = {
+      model: config.model,
+      max_tokens: 8192,
+      system: prompts.system,
+      messages: [{ role: "user", content: prompts.user }]
+    };
+    const outputConfig = {};
+    if (useStructuredOutput) outputConfig.format = { type: "json_schema", schema: claudeSchema() };
+    // Haiku 4.5 不接受 effort；其他模型用 low 降低延迟
+    if (!/haiku/i.test(config.model)) outputConfig.effort = "low";
+    if (Object.keys(outputConfig).length) body.output_config = outputConfig;
+    return {
+      url: `${PROVIDERS.Claude.baseUrl}/messages`,
+      timeout: config.timeoutMs,
+      headers: {
+        "x-api-key": config.apiKey,
+        "anthropic-version": "2023-06-01",
+        "Content-Type": "application/json",
+        Accept: "application/json"
+      },
+      body: JSON.stringify(body)
+    };
+  }
+
+  function parseClaudeResponse(responseBody) {
+    const body = parseJsonText(responseBody);
+    if (body?.stop_reason === "refusal") throw new Error("Claude declined the request");
+    const text = (Array.isArray(body?.content) ? body.content : [])
+      .filter((block) => block?.type === "text")
+      .map((block) => block.text || "")
+      .join("");
+    if (!text) throw new Error("Claude response has no text");
+    return parseJsonText(text);
   }
 
   function stripCodeFence(value) {
@@ -796,6 +901,10 @@
     createGeminiRequest,
     parseOpenAIResponse,
     parseGeminiResponse,
+    createClaudeRequest,
+    parseClaudeResponse,
+    providerForModel,
+    initialBatchSize,
     validateTranslations,
     salvageTranslations,
     mergeTranslationRows,

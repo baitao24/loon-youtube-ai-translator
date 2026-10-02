@@ -38,7 +38,7 @@ test("normalizes DualSubs AI settings and keeps secrets opaque", () => {
     ai_enabled: "true",
     concurrency: "20"
   });
-  assert.equal(Core.VERSION, "0.5.1");
+  assert.equal(Core.VERSION, "0.6.0");
   assert.equal(config.provider, "OpenAI-Compatible");
   assert.equal(config.apiKey, "secret-value");
   assert.equal(config.model, "deepseek-chat");
@@ -169,7 +169,7 @@ test("builds OpenAI-compatible request with JSON mode and header-only key", () =
 });
 
 test("builds current Gemini generateContent request with structured output", () => {
-  assert.equal(Core.normalizeConfig({}).model, "gemini-3.6-flash");
+  assert.equal(Core.normalizeConfig({}).model, "gemini-3.5-flash-lite");
   const config = Core.normalizeConfig({
     provider: "Gemini",
     api_key: "gemini-secret",
@@ -318,4 +318,102 @@ test("Gemini request carries context rows and can omit thinkingLevel", () => {
   );
   assert.equal(off.generationConfig.thinkingConfig, undefined);
   assert.equal(JSON.parse(off.contents[0].parts[0].text).context_before, undefined);
+});
+
+test("provider and API key follow the selected model", () => {
+  const keys = { api_key: "g", deepseek_api_key: "d", openai_api_key: "o", claude_api_key: "c" };
+  const cases = [
+    ["gemini-3.8-flash", "Gemini", "g"],
+    ["deepseek-flash", "DeepSeek", "d"],
+    ["gpt-5.4-mini", "OpenAI", "o"],
+    ["claude-haiku-4-5", "Claude", "c"]
+  ];
+  for (const [model, provider, key] of cases) {
+    const config = Core.normalizeConfig({ ...keys, model });
+    assert.equal(config.provider, provider, model);
+    assert.equal(config.apiKey, key, model);
+  }
+  assert.equal(Core.normalizeConfig({ model: "deepseek-flash" }).baseUrl, "https://api.deepseek.com");
+  assert.equal(Core.normalizeConfig({ model: "gpt-5.4-nano" }).baseUrl, "https://api.openai.com/v1");
+  // 只填了 Gemini Key 却选了 DeepSeek：视为未配置，不会把 Gemini Key 发给别家
+  const mismatched = Core.normalizeConfig({ api_key: "g", model: "deepseek-flash" });
+  assert.equal(mismatched.apiKey, "");
+  assert.equal(Core.isConfigured(mismatched), false);
+});
+
+test("batch size starts by model speed class and adapts unless fixed", () => {
+  assert.equal(Core.initialBatchSize("gemini-3.5-flash-lite"), 30);
+  assert.equal(Core.initialBatchSize("gpt-5.4-nano"), 30);
+  assert.equal(Core.initialBatchSize("claude-haiku-4-5"), 30);
+  assert.equal(Core.initialBatchSize("deepseek-flash"), 30);
+  assert.equal(Core.initialBatchSize("gemini-3.8-flash"), 15);
+  assert.equal(Core.initialBatchSize("deepseek-v4-pro"), 15);
+  const adaptive = Core.normalizeConfig({ model: "gemini-3.8-flash" });
+  assert.equal(adaptive.adaptiveBatch, true);
+  assert.equal(adaptive.maxBatchItems, 15);
+  const fixed = Core.normalizeConfig({ model: "gemini-3.8-flash", batch_size: "20" });
+  assert.equal(fixed.adaptiveBatch, false);
+  assert.equal(fixed.maxBatchItems, 20);
+});
+
+test("OpenAI and DeepSeek requests disable reasoning the way each provider expects", () => {
+  const batch = [{ id: 0, text: "hello" }];
+  const languages = { source: "en", target: "zh-Hans" };
+  const openai = Core.createOpenAIRequest(
+    Core.normalizeConfig({ model: "gpt-5.4-mini", openai_api_key: "o" }), batch, languages, true
+  );
+  const openaiBody = JSON.parse(openai.body);
+  assert.equal(openai.url, "https://api.openai.com/v1/chat/completions");
+  assert.equal(openai.headers.Authorization, "Bearer o");
+  assert.equal(openaiBody.reasoning_effort, "none");
+  assert.equal(openaiBody.temperature, undefined, "GPT-5.x 不接受自定义 temperature");
+  assert.deepEqual(openaiBody.response_format, { type: "json_object" });
+
+  const deepseek = Core.createOpenAIRequest(
+    Core.normalizeConfig({ model: "deepseek-flash", deepseek_api_key: "d" }), batch, languages, true
+  );
+  const deepseekBody = JSON.parse(deepseek.body);
+  assert.equal(deepseek.url, "https://api.deepseek.com/chat/completions");
+  assert.deepEqual(deepseekBody.thinking, { type: "disabled" });
+  assert.equal(deepseekBody.reasoning_effort, undefined);
+  assert.match(deepseekBody.messages[0].content, /JSON/, "DeepSeek JSON 模式要求提示词里出现 json");
+});
+
+test("Claude request uses the Messages API with structured output", () => {
+  const batch = [{ id: 3, text: "hello" }];
+  batch.context = ["before"];
+  const languages = { source: "en", target: "zh-Hans" };
+  const haiku = Core.createClaudeRequest(
+    Core.normalizeConfig({ model: "claude-haiku-4-5", claude_api_key: "c" }), batch, languages, true
+  );
+  const body = JSON.parse(haiku.body);
+  assert.equal(haiku.url, "https://api.anthropic.com/v1/messages");
+  assert.equal(haiku.headers["x-api-key"], "c");
+  assert.equal(haiku.headers["anthropic-version"], "2023-06-01");
+  assert.equal(body.model, "claude-haiku-4-5");
+  assert.equal(body.messages[0].role, "user");
+  assert.deepEqual(JSON.parse(body.messages[0].content).context_before, ["before"]);
+  assert.equal(body.output_config.format.type, "json_schema");
+  assert.equal(body.output_config.format.schema.additionalProperties, false);
+  assert.equal(body.output_config.format.schema.properties.translations.items.additionalProperties, false);
+  assert.equal(body.output_config.effort, undefined, "Haiku 4.5 不接受 effort");
+  assert.equal(body.thinking, undefined);
+
+  const sonnet = JSON.parse(
+    Core.createClaudeRequest(Core.normalizeConfig({ model: "claude-sonnet-5-5", claude_api_key: "c" }), batch, languages, false).body
+  );
+  assert.equal(sonnet.output_config.effort, "low");
+  assert.equal(sonnet.output_config.format, undefined);
+
+  const parsed = Core.parseClaudeResponse(
+    JSON.stringify({
+      stop_reason: "end_turn",
+      content: [{ type: "text", text: JSON.stringify({ translations: [{ id: 3, text: "你好" }] }) }]
+    })
+  );
+  assert.deepEqual(parsed.translations, [{ id: 3, text: "你好" }]);
+  assert.throws(
+    () => Core.parseClaudeResponse(JSON.stringify({ stop_reason: "refusal", content: [] })),
+    /declined/
+  );
 });

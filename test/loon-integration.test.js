@@ -407,33 +407,43 @@ test("a batch that drops one line keeps the other AI rows", async () => {
   assert.equal(result.doneValue.headers["x-dualsubs-ai-result"], "ai-partial");
 });
 
-test("models that reject thinkingLevel are retried without it and remembered", async () => {
+function thinkingRun(store, model, video, seen, rejects) {
+  return runLoon({
+    argument: { ...config(), model },
+    request: { url: processedUrl("json3", video), method: "GET", headers: {} },
+    response: { status: 200, headers: { "Content-Type": "application/json" }, body: sourceJson3() },
+    store,
+    httpClient: {
+      get: noGet,
+      post(request, callback) {
+        const thinking = JSON.parse(request.body).generationConfig.thinkingConfig || null;
+        seen.push(thinking);
+        if (rejects(thinking)) {
+          callback(null, { status: 400 }, JSON.stringify({ error: { message: "thinking_level is not supported for this model" } }));
+          return;
+        }
+        successfulGemini(callback);
+      }
+    }
+  });
+}
+
+test("Gemini 2.5 models fall back to thinkingBudget 0 and remember it", async () => {
   const store = new Map();
   const seen = [];
-  const run = () =>
-    runLoon({
-      argument: { ...config(), model: "gemini-2.5-flash-lite" },
-      request: { url: processedUrl("json3", `nothink${seen.length}`), method: "GET", headers: {} },
-      response: { status: 200, headers: { "Content-Type": "application/json" }, body: sourceJson3() },
-      store,
-      httpClient: {
-        get: noGet,
-        post(request, callback) {
-          const body = JSON.parse(request.body);
-          seen.push(Boolean(body.generationConfig.thinkingConfig));
-          if (body.generationConfig.thinkingConfig) {
-            callback(null, { status: 400 }, JSON.stringify({ error: { message: "thinking_level is not supported for this model" } }));
-            return;
-          }
-          successfulGemini(callback);
-        }
-      }
-    });
-  const first = await run();
+  const rejects = (thinking) => Boolean(thinking?.thinkingLevel);
+  const first = await thinkingRun(store, "gemini-2.5-flash-lite", "t1", seen, rejects);
   assert.equal(first.doneValue.headers["x-dualsubs-ai-result"], "ai");
-  assert.deepEqual(seen, [true, false]);
-  await run();
-  assert.deepEqual(seen, [true, false, false], "第二次直接不带 thinkingLevel");
+  assert.deepEqual(seen, [{ thinkingLevel: "minimal" }, { thinkingBudget: 0 }]);
+  await thinkingRun(store, "gemini-2.5-flash-lite", "t2", seen, rejects);
+  assert.deepEqual(seen.slice(2), [{ thinkingBudget: 0 }], "第二次直接用记住的设置");
+});
+
+test("Gemini 3.x models that reject minimal thinking move to low, not to default thinking", async () => {
+  const seen = [];
+  const result = await thinkingRun(new Map(), "gemini-3.8-flash", "t3", seen, (thinking) => thinking?.thinkingLevel === "minimal");
+  assert.equal(result.doneValue.headers["x-dualsubs-ai-result"], "ai");
+  assert.deepEqual(seen, [{ thinkingLevel: "minimal" }, { thinkingLevel: "low" }]);
 });
 
 test("each batch sends the two preceding source rows as context", async () => {
@@ -453,4 +463,75 @@ test("each batch sends the two preceding source rows as context", async () => {
     }
   });
   assert.deepEqual(contexts, [[], ["Line 3", "Line 4"]]);
+});
+
+test("Claude models translate through the Messages API with their own key", async () => {
+  let apiRequest;
+  const result = await runLoon({
+    argument: { ...config(), model: "claude-haiku-4-5", api_key: "gemini-key", claude_api_key: "claude-key" },
+    request: { url: processedUrl(), method: "GET", headers: {} },
+    response: { status: 200, headers: { "Content-Type": "application/json" }, body: sourceJson3() },
+    httpClient: {
+      get: noGet,
+      post(request, callback) {
+        apiRequest = request;
+        callback(
+          null,
+          { status: 200 },
+          JSON.stringify({
+            stop_reason: "end_turn",
+            content: [
+              { type: "text", text: JSON.stringify({ translations: [{ id: 0, text: "AI你好" }, { id: 1, text: "AI世界" }] }) }
+            ]
+          })
+        );
+      }
+    }
+  });
+  assert.equal(apiRequest.url, "https://api.anthropic.com/v1/messages");
+  assert.equal(apiRequest.headers["x-api-key"], "claude-key");
+  assert.equal(apiRequest.body.includes("gemini-key"), false);
+  assert.equal(JSON.parse(result.doneValue.body).events[1].segs[0].utf8, "AI世界\nWorld");
+  assert.equal(result.doneValue.headers["x-dualsubs-ai-result"], "ai");
+});
+
+function manyCueJson3(count) {
+  return JSON.stringify({
+    events: Array.from({ length: count }, (_, index) => ({
+      tStartMs: index * 1000,
+      dDurationMs: 900,
+      segs: [{ utf8: `Line ${index}` }]
+    }))
+  });
+}
+
+test("a model too slow for its batch size gets smaller batches next time", async () => {
+  const store = new Map();
+  const sizes = [];
+  const slowRun = (video, respond) =>
+    runLoon({
+      argument: { ...config(), model: "gemini-3.8-flash", parallel: "2", max_wait_ms: "3000", timeout_ms: "3000" },
+      request: { url: processedUrl("json3", video), method: "GET", headers: {} },
+      response: { status: 200, headers: { "Content-Type": "application/json" }, body: manyCueJson3(60) },
+      store,
+      doneTimeoutMs: 4500,
+      httpClient: {
+        get: noGet,
+        post(request, callback) {
+          const ids = requestedIds(request);
+          sizes.push(ids.length);
+          if (respond) callback(null, { status: 200 }, geminiRows(ids.map((id) => ({ id, text: `AI${id}` }))));
+          // respond = false：一直不返回，模拟这批在时限内翻不完
+        }
+      }
+    });
+  await slowRun("slow1", false);
+  assert.equal(sizes[0], 15, "没有测速数据时，非 lite 模型先用 15 条");
+  const speed = JSON.parse(store.get("@DualSubs-AI.ModelSpeed.v1"))["gemini-3.8-flash"];
+  assert.ok(speed.msPerRow > 200, `超时批次应记成很慢，实际 ${speed.msPerRow}ms/行`);
+
+  sizes.length = 0;
+  const second = await slowRun("slow2", true);
+  assert.ok(sizes[0] < 15 && sizes[0] >= 8, `下次应缩小批次，实际 ${sizes[0]} 条`);
+  assert.equal(second.doneValue.headers["x-dualsubs-ai-result"], "ai", "这次接口立即返回，小批次也能全部翻完");
 });

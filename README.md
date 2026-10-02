@@ -1,18 +1,18 @@
 # YouTube AI 双语字幕（Loon 插件）
 
-在 iPhone / iPad 的 YouTube App 里，用 Gemini 把字幕翻成双语：一行原文，一行译文。
+在 iPhone / iPad 的 YouTube App 里，用 AI 把字幕翻成双语：一行原文，一行译文。支持 Gemini、DeepSeek、OpenAI、Claude。
 
 - 打开字幕后约 6 秒内尽量多翻，十几分钟以内的视频通常一次翻完
 - 长视频第一次只能翻开头一部分，没翻到的行先显示原文；关掉再打开字幕，会接着翻剩下的部分
 - 翻好的结果会缓存，同一个视频再看不用重新翻
-- 只需要自己的 Gemini API Key，不需要部署任何服务
+- 只需要所选模型那一家的 API Key，不需要部署任何服务
 
 ## 安装
 
 1. [一键导入 Loon](https://www.nsloon.com/openloon/import?plugin=https%3A%2F%2Fraw.githubusercontent.com%2Fbaitao24%2Floon-youtube-ai-translator%2Fmain%2Fdist%2FYouTube.AI.Translate.remote.plugin)，或手动添加订阅地址：
    `https://raw.githubusercontent.com/baitao24/loon-youtube-ai-translator/main/dist/YouTube.AI.Translate.remote.plugin`
 2. 确认 Loon 已开启 MITM 并信任证书。
-3. 在插件设置里填写 Gemini API Key（在 [Google AI Studio](https://aistudio.google.com/apikey) 创建）。
+3. 在插件设置里选模型，并填写对应那一家的 API Key（见下方「模型与 API Key」）。
 4. 关闭其他会处理 YouTube 字幕的插件（DualSubs、旧版翻译插件等），否则会重复处理同一条字幕请求。
 
 可以和 YouTube 去广告插件一起用：本插件只拦截字幕接口 `/api/timedtext`，不碰 `player`、`get_watch` 等去广告插件需要处理的接口。
@@ -22,13 +22,26 @@
 | 设置 | 说明 |
 | --- | --- |
 | AI 翻译 | 总开关。关闭后只显示 YouTube 原文字幕 |
-| Gemini API Key | 只保存在本机 Loon 里。建议在 Google 后台设置用量上限 |
-| 模型 | 默认 `gemini-3.5-flash-lite`，真机实测最快。不带 lite 的模型更细致但更慢，长视频第一次能翻到的比例会变少 |
+| 模型 | 下拉选择，服务商按模型名自动判断，见下方「模型与 API Key」 |
+| Gemini / DeepSeek / OpenAI / Claude API Key | 只填所选模型那一家的。Key 只保存在本机 Loon 里，建议在服务商后台设置用量上限 |
 | 翻译成 | 简体中文、繁體中文、日本語、한국어、English。在 YouTube 字幕菜单里选了「自动翻译」成某种语言时，以菜单为准 |
 | 字幕顺序 | 原文在上 / 译文在上 |
 | 只显示译文 | 开启后不显示原文 |
 | 额外翻译要求 | 例如“人名保留英文”“科技术语按业内习惯翻译” |
 | 日志等级 | 排查问题时用；日志不记录 API Key 和字幕全文 |
+
+## 模型与 API Key
+
+| 服务商 | 可选模型 | 填哪个 Key | 在哪创建 |
+| --- | --- | --- | --- |
+| Gemini | `gemini-3.5-flash-lite`（默认）、`gemini-3.1-flash-lite`、`gemini-flash-lite-latest`、`gemini-2.5-flash-lite`、`gemini-3.5-flash`、`gemini-3.8-flash` | Gemini API Key | [Google AI Studio](https://aistudio.google.com/apikey) |
+| DeepSeek | `deepseek-flash`、`deepseek-v4-pro` | DeepSeek API Key | [DeepSeek 开放平台](https://platform.deepseek.com/api_keys) |
+| OpenAI | `gpt-5.4-nano`、`gpt-5.4-mini` | OpenAI API Key | [OpenAI Platform](https://platform.openai.com/api-keys) |
+| Claude | `claude-haiku-4-5`、`claude-sonnet-5-5` | Claude API Key | [Claude Platform](https://platform.claude.com/settings/keys) |
+
+带 lite、nano、haiku 的模型和 `deepseek-flash` 是快速模型，适合字幕；其他模型翻得更细，但更慢，长视频第一次开字幕能翻到的部分会少一些。目前只有默认的 Gemini 3.5 Flash-Lite 做过真机测速。
+
+每家的「思考/推理」模式都会关掉或调到最低（Gemini 用最低思考档、DeepSeek 关闭思考、GPT 设为不推理、Claude Sonnet 用 low），因为字幕翻译要的是速度。
 
 ## 工作原理
 
@@ -42,9 +55,10 @@ YouTube App 开字幕时会一次性请求整份字幕（`/api/timedtext`）。�
 | Gemini 3.5 Flash-Lite 速度 | 30 条一批约 2.5～3 秒 | 每批 30 条，按时间顺序翻，开头最先翻好 |
 | Loon 同时在途的请求数 | 约 8 个，再多会排队 | 并发 8 |
 | 模型偶尔少返回一行 | 约每 20 批 1 次 | 按行校验，缺的行显示原文，其余照用 |
+| 不同模型速度差很多 | 慢模型 30 条一批会超时 | 按每个模型的实测速度自动调整每批条数（8～40 条），目标每批约 3 秒 |
 | YouTube 官方机翻（`tlang` 参数） | 一律返回 429 拦截页 | 不再请求官方机翻，并去掉 App 自带的 `tlang` |
 
-按这个速度，一次开字幕大约能翻 400～500 条，相当于视频开头 15～20 分钟。
+按 Gemini 3.5 Flash-Lite 的速度，一次开字幕大约能翻 400～500 条，相当于视频开头 15～20 分钟。慢一些的模型第一次能翻到的部分会少，但批次会自动变小，开关字幕几次也能翻完。
 
 每批还会附带前两行原文作为上下文，避免一句话被切在两批之间时译得生硬。
 
@@ -53,7 +67,10 @@ YouTube App 开字幕时会一次性请求整份字幕（`/api/timedtext`）。�
 ## 常见问题
 
 **怎么确认是 AI 翻的？**
-插件不再使用任何机器翻译。屏幕上出现的译文都来自 Gemini；没翻到的行只显示原文。
+插件不使用任何机器翻译。屏幕上出现的译文都来自你选的 AI 模型；没翻到的行只显示原文。
+
+**换了模型后，只翻了开头一小段？**
+慢模型第一次会按保守的批次大小试翻，并记下实测速度，之后自动缩小批次。关掉再打开字幕一两次就会好转。如果一直不翻，检查是否填了这个模型对应那一家的 Key。
 
 **长视频后半段只有英文？**
 第一次开字幕的时间只够翻开头一部分。关掉字幕再打开，插件会只翻剩下的行，通常两三次就能翻完，之后直接用缓存。
@@ -71,7 +88,7 @@ YouTube App 开字幕时会一次性请求整份字幕（`/api/timedtext`）。�
 AI rows 448/1422 (31%), new 448, failed batches 0, 5711ms
 ```
 
-依次是已翻行数 / 总行数、本次新翻的行数、失败的批次数、耗时。有失败批次时，行尾会附上第一个失败原因。
+依次是已翻行数 / 总行数、本次新翻的行数、失败的批次数、耗时。有失败批次时，行尾会附上第一个失败原因。上面一行 `AI translating ... in N batch(es) of M via ...` 里的 M 是这次每批的条数。
 
 响应头 `x-dualsubs-ai-result` 标明结果：
 
@@ -86,7 +103,7 @@ AI rows 448/1422 (31%), new 448, failed batches 0, 5711ms
 
 ## 隐私
 
-字幕文本会直接发给 Google Gemini 翻译。本项目没有中转服务器、账号系统或遥测。
+字幕文本会直接发给你所选模型的服务商（Google、DeepSeek、OpenAI 或 Anthropic）翻译，只用那一家的 Key。本项目没有中转服务器、账号系统或遥测。
 
 翻译结果缓存在 Loon 本机（`$persistentStore`），缓存里不包含 API Key。Loon 插件的输入框不是系统钥匙串，建议使用设了用量上限、可随时撤销的 API Key。
 

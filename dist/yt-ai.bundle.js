@@ -1,4 +1,4 @@
-// YouTube AI bilingual subtitles for Loon v0.5.1
+// YouTube AI bilingual subtitles for Loon v0.6.0
 // Translates the source timedtext response with Gemini; untranslated rows stay as source text.
 // Only intercepts /api/timedtext so it can run alongside YouTube ad-block plugins.
 // Never logs API keys or full subtitle payloads.
@@ -9,7 +9,7 @@
 })(typeof globalThis === "object" ? globalThis : this, function createYouTubeAICore() {
   "use strict";
 
-  const VERSION = "0.5.1";
+  const VERSION = "0.6.0";
   const QUERY_FLAG = "dsai";
   // 不能用 "tlang"：2026-10 起 YouTube 对带 tlang 的 timedtext 请求一律返回 429。
   const QUERY_TARGET = "dsai_target";
@@ -19,7 +19,7 @@
     provider: "Gemini",
     aiEnabled: true,
     apiKey: "",
-    model: "gemini-3.6-flash",
+    model: "gemini-3.5-flash-lite",
     baseUrl: "https://api.openai.com/v1",
     geminiBaseUrl: "https://generativelanguage.googleapis.com/v1beta",
     targetLanguage: "zh-Hans",
@@ -80,6 +80,28 @@
     return result;
   }
 
+  // 服务商由模型名推断，每家用自己的 Key 输入框；切换模型不用重填 Key
+  const PROVIDERS = Object.freeze({
+    Gemini: { keyField: "api_key" },
+    OpenAI: { keyField: "openai_api_key", baseUrl: "https://api.openai.com/v1" },
+    DeepSeek: { keyField: "deepseek_api_key", baseUrl: "https://api.deepseek.com" },
+    Claude: { keyField: "claude_api_key", baseUrl: "https://api.anthropic.com/v1" }
+  });
+
+  function providerForModel(model) {
+    const name = String(model || "").toLowerCase();
+    if (name.startsWith("gemini")) return "Gemini";
+    if (name.startsWith("deepseek")) return "DeepSeek";
+    if (name.startsWith("claude")) return "Claude";
+    if (/^(gpt|o\d)/.test(name)) return "OpenAI";
+    return "";
+  }
+
+  // 没有实测速度前的初始批大小：轻量模型 30 条，其他模型先保守用 15 条
+  function initialBatchSize(model) {
+    return /lite|nano|haiku|deepseek-flash/i.test(String(model || "")) ? 30 : 15;
+  }
+
   // 插件里用中文显示语言名，这里换回语言代码
   const LANGUAGE_CODES = Object.freeze({
     简体中文: "zh-Hans",
@@ -99,8 +121,13 @@
       argument && typeof argument === "object" && !Array.isArray(argument)
         ? argument
         : parseArgumentString(argument);
-    const providerRaw = String(raw.provider || raw.Provider || DEFAULTS.provider).toLowerCase();
-    const provider = providerRaw.includes("gemini") ? "Gemini" : "OpenAI-Compatible";
+    const model = String(raw.model || raw.Model || DEFAULTS.model).trim();
+    const providerRaw = String(raw.provider || raw.Provider || "").toLowerCase();
+    const provider = providerRaw.includes("compatible")
+      ? "OpenAI-Compatible"
+      : providerForModel(model) || (providerRaw && !providerRaw.includes("gemini") ? "OpenAI-Compatible" : "Gemini");
+    const keyField = PROVIDERS[provider]?.keyField || "api_key";
+    const configuredBatch = raw.batch_size ?? raw.max_batch_items ?? raw.maxBatchItems;
     const positionRaw = String(raw.position || raw.Position || DEFAULTS.position).toLowerCase();
     const position =
       positionRaw.includes("source") || positionRaw === "forward" || positionRaw.includes("原文在上")
@@ -118,9 +145,14 @@
         raw.ai_enabled ?? raw.aiEnabled ?? raw.AIEnabled,
         DEFAULTS.aiEnabled
       ),
-      apiKey: String(raw.api_key || raw.apiKey || raw.APIKey || DEFAULTS.apiKey).trim(),
-      model: String(raw.model || raw.Model || DEFAULTS.model).trim(),
-      baseUrl: String(raw.base_url || raw.baseUrl || raw.BaseURL || DEFAULTS.baseUrl).trim(),
+      apiKey: String(
+        raw[keyField] || (keyField === "api_key" ? raw.apiKey || raw.APIKey : "") || DEFAULTS.apiKey
+      ).trim(),
+      model,
+      baseUrl: PROVIDERS[provider]?.baseUrl ||
+        String(raw.base_url || raw.baseUrl || raw.BaseURL || DEFAULTS.baseUrl).trim(),
+      // 插件没传批大小时按模型实测速度自动调整
+      adaptiveBatch: configuredBatch === undefined || configuredBatch === "",
       geminiBaseUrl: String(
         raw.gemini_base_url || raw.geminiBaseUrl || DEFAULTS.geminiBaseUrl
       ).trim(),
@@ -138,8 +170,8 @@
       position,
       customPrompt: String(raw.custom_prompt || raw.customPrompt || DEFAULTS.customPrompt).trim(),
       maxBatchItems: clampInteger(
-        raw.batch_size ?? raw.max_batch_items ?? raw.maxBatchItems,
-        DEFAULTS.maxBatchItems,
+        configuredBatch,
+        configuredBatch === undefined || configuredBatch === "" ? initialBatchSize(model) : DEFAULTS.maxBatchItems,
         5,
         400
       ),
@@ -176,7 +208,7 @@
         0,
         1000
       ),
-      thinkingLevel: ["off", "minimal", "low", "medium", "high"].includes(
+      thinkingLevel: ["off", "budget0", "minimal", "low", "medium", "high"].includes(
         String(raw.thinking_level || raw.thinkingLevel || DEFAULTS.thinkingLevel).toLowerCase()
       )
         ? String(
@@ -469,9 +501,17 @@
         { role: "system", content: prompts.system },
         { role: "user", content: prompts.user }
       ],
-      temperature: 0,
       stream: false
     };
+    if (config.provider === "OpenAI") {
+      // GPT-5.x 系列：关闭推理最快；这些模型不接受自定义 temperature
+      body.reasoning_effort = "none";
+    } else if (config.provider === "DeepSeek") {
+      // DeepSeek 默认开思考模式，字幕翻译要关掉，否则很慢
+      body.thinking = { type: "disabled" };
+    } else {
+      body.temperature = 0;
+    }
     if (useJsonMode) body.response_format = { type: "json_object" };
     return {
       url: normalizeOpenAIEndpoint(config.baseUrl),
@@ -514,8 +554,10 @@
             }
           }
         };
-    // 部分模型（如 2.5 系列）不接受 thinkingLevel，运行时遇到 400 会改成 off 重试
-    if (config.thinkingLevel !== "off") {
+    // 部分模型（如 2.5 系列）不接受 thinkingLevel，运行时遇到 400 会换成 thinkingBudget: 0 或 low 重试
+    if (config.thinkingLevel === "budget0") {
+      generationConfig.thinkingConfig = { thinkingBudget: 0 };
+    } else if (config.thinkingLevel !== "off") {
       generationConfig.thinkingConfig = { thinkingLevel: config.thinkingLevel };
     }
     return {
@@ -532,6 +574,69 @@
         generationConfig
       })
     };
+  }
+
+  function claudeSchema() {
+    return {
+      type: "object",
+      properties: {
+        translations: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: { id: { type: "integer" }, text: { type: "string" } },
+            required: ["id", "text"],
+            additionalProperties: false
+          }
+        }
+      },
+      required: ["translations"],
+      additionalProperties: false
+    };
+  }
+
+  // Claude Messages API（原生 HTTP；Loon 里没有 SDK）
+  function createClaudeRequest(config, batch, languages, useStructuredOutput) {
+    const prompts = buildPrompts(
+      batch,
+      languages.source,
+      languages.target,
+      config.customPrompt,
+      batch.context
+    );
+    const body = {
+      model: config.model,
+      max_tokens: 8192,
+      system: prompts.system,
+      messages: [{ role: "user", content: prompts.user }]
+    };
+    const outputConfig = {};
+    if (useStructuredOutput) outputConfig.format = { type: "json_schema", schema: claudeSchema() };
+    // Haiku 4.5 不接受 effort；其他模型用 low 降低延迟
+    if (!/haiku/i.test(config.model)) outputConfig.effort = "low";
+    if (Object.keys(outputConfig).length) body.output_config = outputConfig;
+    return {
+      url: `${PROVIDERS.Claude.baseUrl}/messages`,
+      timeout: config.timeoutMs,
+      headers: {
+        "x-api-key": config.apiKey,
+        "anthropic-version": "2023-06-01",
+        "Content-Type": "application/json",
+        Accept: "application/json"
+      },
+      body: JSON.stringify(body)
+    };
+  }
+
+  function parseClaudeResponse(responseBody) {
+    const body = parseJsonText(responseBody);
+    if (body?.stop_reason === "refusal") throw new Error("Claude declined the request");
+    const text = (Array.isArray(body?.content) ? body.content : [])
+      .filter((block) => block?.type === "text")
+      .map((block) => block.text || "")
+      .join("");
+    if (!text) throw new Error("Claude response has no text");
+    return parseJsonText(text);
   }
 
   function stripCodeFence(value) {
@@ -800,6 +905,10 @@
     createGeminiRequest,
     parseOpenAIResponse,
     parseGeminiResponse,
+    createClaudeRequest,
+    parseClaudeResponse,
+    providerForModel,
+    initialBatchSize,
     validateTranslations,
     salvageTranslations,
     mergeTranslationRows,
@@ -829,8 +938,14 @@
   // 剩余时间不够一批正常耗时（真机 2～3 秒）就不再发新批次。
   const MIN_LAUNCH_MS = 2000;
   const RENDER_RESERVE_MS = 150;
-  // 记住不接受 thinkingLevel 的模型，下次直接不带这个参数
-  const NO_THINKING_KEY = "@DualSubs-AI.NoThinkingModels.v1";
+  // 记住每个 Gemini 模型能接受的思考设置，下次直接用
+  const THINKING_KEY = "@DualSubs-AI.ThinkingLevel.v1";
+  // 记住每个模型每行的平均耗时，用来自动决定每批条数
+  const SPEED_KEY = "@DualSubs-AI.ModelSpeed.v1";
+  // 每批目标耗时：留出余量，保证一次开字幕内能跑完两轮
+  const TARGET_BATCH_MS = 3000;
+  const MIN_BATCH_ROWS = 8;
+  const MAX_BATCH_ROWS = 40;
   // 每批附带前面几行原文作上下文，避免句子被批次切断后译得生硬
   const CONTEXT_ROWS = 2;
   const LOG_LEVELS = { OFF: 99, ERROR: 40, WARN: 30, INFO: 20, DEBUG: 10 };
@@ -977,55 +1092,67 @@
     });
   }
 
+  // 思考设置被拒时的退路：2.5 系列用 thinkingBudget 0；其他模型 minimal → low → 不传
+  function nextThinkingLevel(model, level) {
+    if (level === "off") return "";
+    if (/gemini-2\.5/i.test(model)) return level === "budget0" ? "off" : "budget0";
+    return level === "minimal" ? "low" : "off";
+  }
+
+  async function translateGemini(batch, languages, level) {
+    try {
+      const raw = await httpPost(
+        Core.createGeminiRequest(
+          Object.assign({}, requestConfigWithinDeadline(), { thinkingLevel: level }),
+          batch,
+          languages,
+          true
+        )
+      );
+      return Core.salvageTranslations(Core.parseGeminiResponse(raw), batch);
+    } catch (error) {
+      const next = nextThinkingLevel(config.model, level);
+      if (error?.status !== 400 || !next || !/thinking/i.test(error.body || "")) throw error;
+      if (config.thinkingLevel === level) {
+        log("INFO", `${config.model} rejected thinking "${level}"; retrying with "${next}"`);
+        config.thinkingLevel = next;
+        writeJsonStore(THINKING_KEY, Object.assign(readJsonStore(THINKING_KEY, {}), { [config.model]: next }));
+      }
+      return translateGemini(batch, languages, next);
+    }
+  }
+
+  async function translateClaude(batch, languages) {
+    try {
+      const raw = await httpPost(Core.createClaudeRequest(requestConfigWithinDeadline(), batch, languages, true));
+      return Core.salvageTranslations(Core.parseClaudeResponse(raw), batch);
+    } catch (error) {
+      if (error?.status !== 400) throw error;
+      log("DEBUG", "Structured output rejected; retrying with prompt-only JSON");
+      const raw = await httpPost(Core.createClaudeRequest(requestConfigWithinDeadline(), batch, languages, false));
+      return Core.salvageTranslations(Core.parseClaudeResponse(raw), batch);
+    }
+  }
+
+  async function translateOpenAIFormat(batch, languages) {
+    try {
+      const raw = await httpPost(Core.createOpenAIRequest(requestConfigWithinDeadline(), batch, languages, true));
+      return Core.salvageTranslations(Core.parseOpenAIResponse(raw), batch);
+    } catch (error) {
+      if (![400, 404, 422].includes(error?.status)) throw error;
+      log("DEBUG", "JSON mode rejected; retrying without response_format");
+      const raw = await httpPost(Core.createOpenAIRequest(requestConfigWithinDeadline(), batch, languages, false));
+      return Core.salvageTranslations(Core.parseOpenAIResponse(raw), batch);
+    }
+  }
+
   async function translateBatch(batch, languages) {
     let lastError;
     for (let attempt = 0; attempt <= config.retries; attempt += 1) {
       try {
-        const requestConfig = requestConfigWithinDeadline();
-        if (config.provider === "Gemini") {
-          try {
-            const raw = await httpPost(Core.createGeminiRequest(requestConfig, batch, languages, true));
-            return Core.salvageTranslations(Core.parseGeminiResponse(raw), batch);
-          } catch (error) {
-            if (error?.status !== 400 || config.thinkingLevel === "off" || !/thinking/i.test(error.body || "")) {
-              throw error;
-            }
-            log("INFO", `${config.model} does not accept thinkingLevel; retrying without it`);
-            config.thinkingLevel = "off";
-            rememberNoThinking(config.model);
-            const raw = await httpPost(
-              Core.createGeminiRequest(
-                Object.assign({}, requestConfigWithinDeadline(), { thinkingLevel: "off" }),
-                batch,
-                languages,
-                true
-              )
-            );
-            return Core.salvageTranslations(Core.parseGeminiResponse(raw), batch);
-          }
-        }
-
-        try {
-          const request = Core.createOpenAIRequest(
-            requestConfig,
-            batch,
-            languages,
-            true
-          );
-          const raw = await httpPost(request);
-          return Core.salvageTranslations(Core.parseOpenAIResponse(raw), batch);
-        } catch (error) {
-          if (![400, 404, 422].includes(error?.status)) throw error;
-          log("DEBUG", "JSON mode rejected; retrying without response_format");
-          const request = Core.createOpenAIRequest(
-            requestConfigWithinDeadline(),
-            batch,
-            languages,
-            false
-          );
-          const raw = await httpPost(request);
-          return Core.salvageTranslations(Core.parseOpenAIResponse(raw), batch);
-        }
+        if (config.provider === "Gemini") return await translateGemini(batch, languages, config.thinkingLevel);
+        if (config.provider === "Claude") return await translateClaude(batch, languages);
+        return await translateOpenAIFormat(batch, languages);
       } catch (error) {
         lastError = error;
         if (attempt < config.retries) await delay(160 * 2 ** attempt);
@@ -1036,20 +1163,34 @@
 
   // 在截止时间前尽量多翻：按时间顺序派发批次，到点就带着已完成的行返回，
   // 不等仍在途的请求。单批失败不影响其他批次。
-  async function translateWithinDeadline(batches, languages) {
+  async function translateWithinDeadline(batches, languages, expectedBatchMs) {
     const rows = [];
     const failures = [];
+    // 每批的耗时样本；超时或到点未完成的批次按 1.5 倍已用时间计，确保慢模型下次自动缩小批次
+    const samples = [];
+    const inFlight = new Map();
+    const launchThreshold = Math.max(MIN_LAUNCH_MS, Math.round((expectedBatchMs || 0) * 0.8));
     let nextIndex = 0;
     let finished = false;
     async function runWorker() {
       while (!finished && nextIndex < batches.length) {
-        if (remainingTime() < MIN_LAUNCH_MS) return;
+        if (remainingTime() < launchThreshold) return;
         const batch = batches[nextIndex];
         nextIndex += 1;
+        const startedAt = Date.now();
+        inFlight.set(batch, startedAt);
         try {
           const translated = await translateBatch(batch, languages);
-          if (!finished) rows.push(...translated);
+          if (finished) return;
+          inFlight.delete(batch);
+          samples.push({ rows: batch.length, ms: Date.now() - startedAt });
+          rows.push(...translated);
         } catch (error) {
+          if (finished) return;
+          inFlight.delete(batch);
+          if (/timeout/i.test(String(error?.message || ""))) {
+            samples.push({ rows: batch.length, ms: (Date.now() - startedAt) * 1.5 });
+          }
           failures.push(error);
         }
       }
@@ -1065,29 +1206,55 @@
     ]);
     clearTimeout(timer);
     finished = true;
-    return { rows: rows.slice(), failures, launched: nextIndex };
+    inFlight.forEach((startedAt, batch) => {
+      samples.push({ rows: batch.length, ms: (Date.now() - startedAt) * 1.5 });
+    });
+    return { rows: rows.slice(), failures, launched: nextIndex, samples };
   }
 
-  function noThinkingModels() {
+  function readJsonStore(key, fallback) {
     try {
-      const parsed = JSON.parse(
-        (typeof $persistentStore === "undefined" ? null : $persistentStore.read(NO_THINKING_KEY)) || "[]"
-      );
-      return Array.isArray(parsed) ? parsed : [];
+      const value = typeof $persistentStore === "undefined" ? null : $persistentStore.read(key);
+      const parsed = value ? JSON.parse(value) : fallback;
+      return parsed && typeof parsed === "object" ? parsed : fallback;
     } catch (_) {
-      return [];
+      return fallback;
     }
   }
 
-  function rememberNoThinking(model) {
+  function writeJsonStore(key, value) {
     try {
-      const models = noThinkingModels();
-      if (!models.includes(model) && typeof $persistentStore !== "undefined") {
-        $persistentStore.write(JSON.stringify(models.concat(model).slice(-20)), NO_THINKING_KEY);
-      }
+      if (typeof $persistentStore !== "undefined") $persistentStore.write(JSON.stringify(value), key);
     } catch (_) {
       // 只是优化，写不进去下次再试
     }
+  }
+
+  // 按这个模型记录下来的速度决定每批条数，目标是每批约 3 秒
+  function batchPlan() {
+    if (!config.adaptiveBatch) return { size: config.maxBatchItems, expectedMs: 0 };
+    const speed = readJsonStore(SPEED_KEY, {})[config.model];
+    if (!(speed?.msPerRow > 0)) return { size: config.maxBatchItems, expectedMs: 0 };
+    const size = Math.min(
+      MAX_BATCH_ROWS,
+      Math.max(MIN_BATCH_ROWS, Math.round(TARGET_BATCH_MS / speed.msPerRow))
+    );
+    return { size, expectedMs: Math.round(size * speed.msPerRow) };
+  }
+
+  function recordSpeed(samples) {
+    if (!config.adaptiveBatch || !samples.length) return;
+    const rows = samples.reduce((sum, item) => sum + item.rows, 0);
+    const ms = samples.reduce((sum, item) => sum + item.ms, 0);
+    if (!rows) return;
+    const measured = ms / rows;
+    const store = readJsonStore(SPEED_KEY, {});
+    const previous = store[config.model]?.msPerRow;
+    store[config.model] = {
+      msPerRow: Math.round(previous > 0 ? previous * 0.5 + measured * 0.5 : measured),
+      updatedAt: Date.now()
+    };
+    writeJsonStore(SPEED_KEY, store);
   }
 
   function attachContext(batches, cues) {
@@ -1247,20 +1414,22 @@
       const rowsKey = Core.makeCacheKey($request.url, config, sourceDocument.cues, languages);
       const known = readRows(rowsKey);
       const pending = sourceDocument.cues.filter((cue) => !known.has(String(cue.id)));
+      const plan = batchPlan();
       const batches = attachContext(
-        Core.chunkCues(pending, config.maxBatchItems, config.maxBatchChars),
+        Core.chunkCues(pending, plan.size, config.maxBatchChars),
         sourceDocument.cues
       );
-      if (config.provider === "Gemini" && noThinkingModels().includes(config.model)) {
-        config.thinkingLevel = "off";
-      }
+      const rememberedThinking = readJsonStore(THINKING_KEY, {})[config.model];
+      if (config.provider === "Gemini" && rememberedThinking) config.thinkingLevel = rememberedThinking;
       log(
         "INFO",
-        `AI translating ${pending.length}/${sourceDocument.cues.length} cues in ${batches.length} batch(es) via ${config.provider}`
+        `AI translating ${pending.length}/${sourceDocument.cues.length} cues in ${batches.length} batch(es) ` +
+          `of ${plan.size} via ${config.provider} ${config.model}`
       );
       const outcome = batches.length
-        ? await translateWithinDeadline(batches, languages)
-        : { rows: [], failures: [], launched: 0 };
+        ? await translateWithinDeadline(batches, languages, plan.expectedMs)
+        : { rows: [], failures: [], launched: 0, samples: [] };
+      recordSpeed(outcome.samples);
       outcome.rows.forEach((row) => known.set(String(row.id), row.text));
       if (outcome.rows.length) writeRows(rowsKey, known);
 

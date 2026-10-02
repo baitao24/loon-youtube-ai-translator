@@ -10,8 +10,14 @@
   // 剩余时间不够一批正常耗时（真机 2～3 秒）就不再发新批次。
   const MIN_LAUNCH_MS = 2000;
   const RENDER_RESERVE_MS = 150;
-  // 记住不接受 thinkingLevel 的模型，下次直接不带这个参数
-  const NO_THINKING_KEY = "@DualSubs-AI.NoThinkingModels.v1";
+  // 记住每个 Gemini 模型能接受的思考设置，下次直接用
+  const THINKING_KEY = "@DualSubs-AI.ThinkingLevel.v1";
+  // 记住每个模型每行的平均耗时，用来自动决定每批条数
+  const SPEED_KEY = "@DualSubs-AI.ModelSpeed.v1";
+  // 每批目标耗时：留出余量，保证一次开字幕内能跑完两轮
+  const TARGET_BATCH_MS = 3000;
+  const MIN_BATCH_ROWS = 8;
+  const MAX_BATCH_ROWS = 40;
   // 每批附带前面几行原文作上下文，避免句子被批次切断后译得生硬
   const CONTEXT_ROWS = 2;
   const LOG_LEVELS = { OFF: 99, ERROR: 40, WARN: 30, INFO: 20, DEBUG: 10 };
@@ -158,55 +164,67 @@
     });
   }
 
+  // 思考设置被拒时的退路：2.5 系列用 thinkingBudget 0；其他模型 minimal → low → 不传
+  function nextThinkingLevel(model, level) {
+    if (level === "off") return "";
+    if (/gemini-2\.5/i.test(model)) return level === "budget0" ? "off" : "budget0";
+    return level === "minimal" ? "low" : "off";
+  }
+
+  async function translateGemini(batch, languages, level) {
+    try {
+      const raw = await httpPost(
+        Core.createGeminiRequest(
+          Object.assign({}, requestConfigWithinDeadline(), { thinkingLevel: level }),
+          batch,
+          languages,
+          true
+        )
+      );
+      return Core.salvageTranslations(Core.parseGeminiResponse(raw), batch);
+    } catch (error) {
+      const next = nextThinkingLevel(config.model, level);
+      if (error?.status !== 400 || !next || !/thinking/i.test(error.body || "")) throw error;
+      if (config.thinkingLevel === level) {
+        log("INFO", `${config.model} rejected thinking "${level}"; retrying with "${next}"`);
+        config.thinkingLevel = next;
+        writeJsonStore(THINKING_KEY, Object.assign(readJsonStore(THINKING_KEY, {}), { [config.model]: next }));
+      }
+      return translateGemini(batch, languages, next);
+    }
+  }
+
+  async function translateClaude(batch, languages) {
+    try {
+      const raw = await httpPost(Core.createClaudeRequest(requestConfigWithinDeadline(), batch, languages, true));
+      return Core.salvageTranslations(Core.parseClaudeResponse(raw), batch);
+    } catch (error) {
+      if (error?.status !== 400) throw error;
+      log("DEBUG", "Structured output rejected; retrying with prompt-only JSON");
+      const raw = await httpPost(Core.createClaudeRequest(requestConfigWithinDeadline(), batch, languages, false));
+      return Core.salvageTranslations(Core.parseClaudeResponse(raw), batch);
+    }
+  }
+
+  async function translateOpenAIFormat(batch, languages) {
+    try {
+      const raw = await httpPost(Core.createOpenAIRequest(requestConfigWithinDeadline(), batch, languages, true));
+      return Core.salvageTranslations(Core.parseOpenAIResponse(raw), batch);
+    } catch (error) {
+      if (![400, 404, 422].includes(error?.status)) throw error;
+      log("DEBUG", "JSON mode rejected; retrying without response_format");
+      const raw = await httpPost(Core.createOpenAIRequest(requestConfigWithinDeadline(), batch, languages, false));
+      return Core.salvageTranslations(Core.parseOpenAIResponse(raw), batch);
+    }
+  }
+
   async function translateBatch(batch, languages) {
     let lastError;
     for (let attempt = 0; attempt <= config.retries; attempt += 1) {
       try {
-        const requestConfig = requestConfigWithinDeadline();
-        if (config.provider === "Gemini") {
-          try {
-            const raw = await httpPost(Core.createGeminiRequest(requestConfig, batch, languages, true));
-            return Core.salvageTranslations(Core.parseGeminiResponse(raw), batch);
-          } catch (error) {
-            if (error?.status !== 400 || config.thinkingLevel === "off" || !/thinking/i.test(error.body || "")) {
-              throw error;
-            }
-            log("INFO", `${config.model} does not accept thinkingLevel; retrying without it`);
-            config.thinkingLevel = "off";
-            rememberNoThinking(config.model);
-            const raw = await httpPost(
-              Core.createGeminiRequest(
-                Object.assign({}, requestConfigWithinDeadline(), { thinkingLevel: "off" }),
-                batch,
-                languages,
-                true
-              )
-            );
-            return Core.salvageTranslations(Core.parseGeminiResponse(raw), batch);
-          }
-        }
-
-        try {
-          const request = Core.createOpenAIRequest(
-            requestConfig,
-            batch,
-            languages,
-            true
-          );
-          const raw = await httpPost(request);
-          return Core.salvageTranslations(Core.parseOpenAIResponse(raw), batch);
-        } catch (error) {
-          if (![400, 404, 422].includes(error?.status)) throw error;
-          log("DEBUG", "JSON mode rejected; retrying without response_format");
-          const request = Core.createOpenAIRequest(
-            requestConfigWithinDeadline(),
-            batch,
-            languages,
-            false
-          );
-          const raw = await httpPost(request);
-          return Core.salvageTranslations(Core.parseOpenAIResponse(raw), batch);
-        }
+        if (config.provider === "Gemini") return await translateGemini(batch, languages, config.thinkingLevel);
+        if (config.provider === "Claude") return await translateClaude(batch, languages);
+        return await translateOpenAIFormat(batch, languages);
       } catch (error) {
         lastError = error;
         if (attempt < config.retries) await delay(160 * 2 ** attempt);
@@ -217,20 +235,34 @@
 
   // 在截止时间前尽量多翻：按时间顺序派发批次，到点就带着已完成的行返回，
   // 不等仍在途的请求。单批失败不影响其他批次。
-  async function translateWithinDeadline(batches, languages) {
+  async function translateWithinDeadline(batches, languages, expectedBatchMs) {
     const rows = [];
     const failures = [];
+    // 每批的耗时样本；超时或到点未完成的批次按 1.5 倍已用时间计，确保慢模型下次自动缩小批次
+    const samples = [];
+    const inFlight = new Map();
+    const launchThreshold = Math.max(MIN_LAUNCH_MS, Math.round((expectedBatchMs || 0) * 0.8));
     let nextIndex = 0;
     let finished = false;
     async function runWorker() {
       while (!finished && nextIndex < batches.length) {
-        if (remainingTime() < MIN_LAUNCH_MS) return;
+        if (remainingTime() < launchThreshold) return;
         const batch = batches[nextIndex];
         nextIndex += 1;
+        const startedAt = Date.now();
+        inFlight.set(batch, startedAt);
         try {
           const translated = await translateBatch(batch, languages);
-          if (!finished) rows.push(...translated);
+          if (finished) return;
+          inFlight.delete(batch);
+          samples.push({ rows: batch.length, ms: Date.now() - startedAt });
+          rows.push(...translated);
         } catch (error) {
+          if (finished) return;
+          inFlight.delete(batch);
+          if (/timeout/i.test(String(error?.message || ""))) {
+            samples.push({ rows: batch.length, ms: (Date.now() - startedAt) * 1.5 });
+          }
           failures.push(error);
         }
       }
@@ -246,29 +278,55 @@
     ]);
     clearTimeout(timer);
     finished = true;
-    return { rows: rows.slice(), failures, launched: nextIndex };
+    inFlight.forEach((startedAt, batch) => {
+      samples.push({ rows: batch.length, ms: (Date.now() - startedAt) * 1.5 });
+    });
+    return { rows: rows.slice(), failures, launched: nextIndex, samples };
   }
 
-  function noThinkingModels() {
+  function readJsonStore(key, fallback) {
     try {
-      const parsed = JSON.parse(
-        (typeof $persistentStore === "undefined" ? null : $persistentStore.read(NO_THINKING_KEY)) || "[]"
-      );
-      return Array.isArray(parsed) ? parsed : [];
+      const value = typeof $persistentStore === "undefined" ? null : $persistentStore.read(key);
+      const parsed = value ? JSON.parse(value) : fallback;
+      return parsed && typeof parsed === "object" ? parsed : fallback;
     } catch (_) {
-      return [];
+      return fallback;
     }
   }
 
-  function rememberNoThinking(model) {
+  function writeJsonStore(key, value) {
     try {
-      const models = noThinkingModels();
-      if (!models.includes(model) && typeof $persistentStore !== "undefined") {
-        $persistentStore.write(JSON.stringify(models.concat(model).slice(-20)), NO_THINKING_KEY);
-      }
+      if (typeof $persistentStore !== "undefined") $persistentStore.write(JSON.stringify(value), key);
     } catch (_) {
       // 只是优化，写不进去下次再试
     }
+  }
+
+  // 按这个模型记录下来的速度决定每批条数，目标是每批约 3 秒
+  function batchPlan() {
+    if (!config.adaptiveBatch) return { size: config.maxBatchItems, expectedMs: 0 };
+    const speed = readJsonStore(SPEED_KEY, {})[config.model];
+    if (!(speed?.msPerRow > 0)) return { size: config.maxBatchItems, expectedMs: 0 };
+    const size = Math.min(
+      MAX_BATCH_ROWS,
+      Math.max(MIN_BATCH_ROWS, Math.round(TARGET_BATCH_MS / speed.msPerRow))
+    );
+    return { size, expectedMs: Math.round(size * speed.msPerRow) };
+  }
+
+  function recordSpeed(samples) {
+    if (!config.adaptiveBatch || !samples.length) return;
+    const rows = samples.reduce((sum, item) => sum + item.rows, 0);
+    const ms = samples.reduce((sum, item) => sum + item.ms, 0);
+    if (!rows) return;
+    const measured = ms / rows;
+    const store = readJsonStore(SPEED_KEY, {});
+    const previous = store[config.model]?.msPerRow;
+    store[config.model] = {
+      msPerRow: Math.round(previous > 0 ? previous * 0.5 + measured * 0.5 : measured),
+      updatedAt: Date.now()
+    };
+    writeJsonStore(SPEED_KEY, store);
   }
 
   function attachContext(batches, cues) {
@@ -428,20 +486,22 @@
       const rowsKey = Core.makeCacheKey($request.url, config, sourceDocument.cues, languages);
       const known = readRows(rowsKey);
       const pending = sourceDocument.cues.filter((cue) => !known.has(String(cue.id)));
+      const plan = batchPlan();
       const batches = attachContext(
-        Core.chunkCues(pending, config.maxBatchItems, config.maxBatchChars),
+        Core.chunkCues(pending, plan.size, config.maxBatchChars),
         sourceDocument.cues
       );
-      if (config.provider === "Gemini" && noThinkingModels().includes(config.model)) {
-        config.thinkingLevel = "off";
-      }
+      const rememberedThinking = readJsonStore(THINKING_KEY, {})[config.model];
+      if (config.provider === "Gemini" && rememberedThinking) config.thinkingLevel = rememberedThinking;
       log(
         "INFO",
-        `AI translating ${pending.length}/${sourceDocument.cues.length} cues in ${batches.length} batch(es) via ${config.provider}`
+        `AI translating ${pending.length}/${sourceDocument.cues.length} cues in ${batches.length} batch(es) ` +
+          `of ${plan.size} via ${config.provider} ${config.model}`
       );
       const outcome = batches.length
-        ? await translateWithinDeadline(batches, languages)
-        : { rows: [], failures: [], launched: 0 };
+        ? await translateWithinDeadline(batches, languages, plan.expectedMs)
+        : { rows: [], failures: [], launched: 0, samples: [] };
+      recordSpeed(outcome.samples);
       outcome.rows.forEach((row) => known.set(String(row.id), row.text));
       if (outcome.rows.length) writeRows(rowsKey, known);
 
