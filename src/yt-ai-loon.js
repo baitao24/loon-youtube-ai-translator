@@ -229,24 +229,30 @@
 
   async function translateClaude(batch, languages) {
     try {
-      const raw = await httpPost(Core.createClaudeRequest(requestConfigWithinDeadline(), batch, languages, true));
+      const raw = await httpPost(Core.createClaudeRequest(requestConfigWithinDeadline(), batch, languages, false));
       return Core.salvageTranslations(Core.parseClaudeResponse(raw), batch);
     } catch (error) {
+      // effort 等参数被拒时，去掉 effort 再试一次
       if (error?.status !== 400) throw error;
-      log("DEBUG", "Structured output rejected; retrying with prompt-only JSON");
-      const raw = await httpPost(Core.createClaudeRequest(requestConfigWithinDeadline(), batch, languages, false));
+      log("DEBUG", "Claude request rejected; retrying without effort");
+      const raw = await httpPost(
+        Core.createClaudeRequest(Object.assign({}, requestConfigWithinDeadline(), { claudeEffort: false }), batch, languages, false)
+      );
       return Core.salvageTranslations(Core.parseClaudeResponse(raw), batch);
     }
   }
 
   async function translateOpenAIFormat(batch, languages) {
     try {
-      const raw = await httpPost(Core.createOpenAIRequest(requestConfigWithinDeadline(), batch, languages, true));
+      const raw = await httpPost(Core.createOpenAIRequest(requestConfigWithinDeadline(), batch, languages, false));
       return Core.salvageTranslations(Core.parseOpenAIResponse(raw), batch);
     } catch (error) {
+      // 推理/思考参数被拒时（兼容服务常见），去掉这些参数再试一次
       if (![400, 404, 422].includes(error?.status)) throw error;
-      log("DEBUG", "JSON mode rejected; retrying without response_format");
-      const raw = await httpPost(Core.createOpenAIRequest(requestConfigWithinDeadline(), batch, languages, false));
+      log("DEBUG", "Request rejected; retrying without reasoning parameters");
+      const raw = await httpPost(
+        Core.createOpenAIRequest(Object.assign({}, requestConfigWithinDeadline(), { plainRequest: true }), batch, languages, false)
+      );
       return Core.salvageTranslations(Core.parseOpenAIResponse(raw), batch);
     }
   }

@@ -259,7 +259,7 @@ test("responses without the dsai marker are left alone", async () => {
   assert.equal(result.doneValue.headers["x-dualsubs-ai-result"], "skipped");
 });
 
-test("OpenAI-compatible adapter retries once without JSON mode", async () => {
+test("OpenAI-compatible adapter retries once without extra parameters", async () => {
   const bodies = [];
   const result = await runLoon({
     argument: { ...config("OpenAI-Compatible"), base_url: "https://example.com/v1" },
@@ -295,8 +295,10 @@ test("OpenAI-compatible adapter retries once without JSON mode", async () => {
     }
   });
   assert.equal(bodies.length, 2);
-  assert.deepEqual(bodies[0].response_format, { type: "json_object" });
-  assert.equal(bodies[1].response_format, undefined);
+  // 紧凑行格式不再开 JSON 模式；第一次被拒后去掉 temperature 等附加参数重试
+  assert.equal(bodies[0].response_format, undefined);
+  assert.equal(bodies[0].temperature, 0);
+  assert.equal(bodies[1].temperature, undefined);
   assert.equal(JSON.parse(result.doneValue.body).events[0].segs[0].utf8, "AI你好\nHello");
 });
 
@@ -334,13 +336,21 @@ function tenCueJson3(prefix) {
 }
 
 function geminiRows(rows) {
+  // 按紧凑行格式回复（主路径）
   return JSON.stringify({
-    candidates: [{ content: { parts: [{ text: JSON.stringify({ translations: rows }) }] } }]
+    candidates: [{ content: { parts: [{ text: rows.map((row) => `${row.id}|${row.text}`).join("\n") }] } }]
   });
 }
 
+function promptLines(request) {
+  return JSON.parse(request.body).contents[0].parts[0].text.split("\n");
+}
+
 function requestedIds(request) {
-  return JSON.parse(JSON.parse(request.body).contents[0].parts[0].text).subtitles.map((row) => row.id);
+  return promptLines(request)
+    .map((line) => line.match(/^(\d+)\|/))
+    .filter(Boolean)
+    .map((match) => Number(match[1]));
 }
 
 function partialRun({ store, onPost, notification }) {
@@ -457,9 +467,8 @@ test("each batch sends the two preceding source rows as context", async () => {
     httpClient: {
       get: noGet,
       post(request, callback) {
-        const user = JSON.parse(JSON.parse(request.body).contents[0].parts[0].text);
-        contexts.push(user.context_before || []);
-        const ids = user.subtitles.map((row) => row.id);
+        contexts.push(promptLines(request).filter((line) => line.startsWith("-|")).map((line) => line.slice(2)));
+        const ids = requestedIds(request);
         callback(null, { status: 200 }, geminiRows(ids.map((id) => ({ id, text: `AI${id}` }))));
       }
     }
@@ -581,9 +590,9 @@ test("sentence regrouping can be turned off and changes the cache identity", asy
       httpClient: {
         get: noGet,
         post(request, callback) {
-          const rows = JSON.parse(JSON.parse(request.body).contents[0].parts[0].text).subtitles;
-          subtitles.push(rows.map((row) => row.text));
-          callback(null, { status: 200 }, geminiRows(rows.map((row) => ({ id: row.id, text: `译${row.id}` }))));
+          const rows = promptLines(request).map((line) => line.match(/^(\d+)\|(.*)$/)).filter(Boolean);
+          subtitles.push(rows.map((match) => match[2]));
+          callback(null, { status: 200 }, geminiRows(rows.map((match) => ({ id: Number(match[1]), text: `译${match[1]}` }))));
         }
       }
     });
@@ -754,4 +763,21 @@ test("partial-translation notices are shown for each video, only deduplicated br
   store.set("@DualSubs-AI.Notices.v2", JSON.stringify(history));
   await run("videoA");
   assert.equal(notes.length, 3);
+});
+
+test("a model that still answers in JSON is understood through the fallback", async () => {
+  const result = await runLoon({
+    argument: config(),
+    request: { url: processedUrl("json3", "jsonreply"), method: "GET", headers: {} },
+    response: { status: 200, headers: { "Content-Type": "application/json" }, body: sourceJson3() },
+    httpClient: {
+      get: noGet,
+      post(_request, callback) {
+        const payload = { translations: [{ id: 0, text: "AI你好" }, { id: 1, text: "AI世界" }] };
+        callback(null, { status: 200 }, JSON.stringify({ candidates: [{ content: { parts: [{ text: "```json\n" + JSON.stringify(payload) + "\n```" }] } }] }));
+      }
+    }
+  });
+  assert.equal(JSON.parse(result.doneValue.body).events[1].segs[0].utf8, "AI世界\nWorld");
+  assert.equal(result.doneValue.headers["x-dualsubs-ai-result"], "ai");
 });

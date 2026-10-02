@@ -38,7 +38,7 @@ test("normalizes DualSubs AI settings and keeps secrets opaque", () => {
     ai_enabled: "true",
     concurrency: "20"
   });
-  assert.equal(Core.VERSION, "0.7.3");
+  assert.equal(Core.VERSION, "0.8.0");
   assert.equal(config.provider, "OpenAI-Compatible");
   assert.equal(config.apiKey, "secret-value");
   assert.equal(config.model, "deepseek-chat");
@@ -190,8 +190,8 @@ test("builds current Gemini generateContent request with structured output", () 
   assert.equal(request.body.includes("gemini-secret"), false);
   assert.equal(body.generationConfig.temperature, undefined);
   assert.equal(body.generationConfig.thinkingConfig.thinkingLevel, "minimal");
-  assert.equal(body.generationConfig.responseMimeType, "application/json");
-  assert.deepEqual(body.generationConfig.responseSchema.required, ["translations"]);
+  assert.equal(body.generationConfig.responseMimeType, "text/plain");
+  assert.equal(body.generationConfig.responseSchema, undefined, "紧凑行格式不再用 JSON Schema");
 });
 
 test("parses thought-aware model responses and rejects misaligned output", () => {
@@ -307,17 +307,19 @@ test("Gemini request carries context rows and can omit thinkingLevel", () => {
   const withThinking = JSON.parse(
     Core.createGeminiRequest(base, batch, { source: "en", target: "zh-Hans" }, true).body
   );
-  const user = JSON.parse(withThinking.contents[0].parts[0].text);
-  assert.deepEqual(user.context_before, batch.context);
-  assert.deepEqual(user.subtitles, [{ id: 5, text: "does, we need to go back" }]);
-  assert.match(withThinking.systemInstruction.parts[0].text, /never translate or return it/);
+  assert.equal(
+    withThinking.contents[0].parts[0].text,
+    "Source: en\nTarget: zh-Hans\n-|For the past 2 months\n-|To understand what it\n5|does, we need to go back"
+  );
+  assert.match(withThinking.systemInstruction.parts[0].text, /never translate or return them/);
   assert.equal(withThinking.generationConfig.thinkingConfig.thinkingLevel, "minimal");
 
   const off = JSON.parse(
     Core.createGeminiRequest({ ...base, thinkingLevel: "off" }, [{ id: 0, text: "x" }], { source: "en", target: "zh-Hans" }, true).body
   );
   assert.equal(off.generationConfig.thinkingConfig, undefined);
-  assert.equal(JSON.parse(off.contents[0].parts[0].text).context_before, undefined);
+  assert.doesNotMatch(off.contents[0].parts[0].text, /^-\|/m);
+  assert.doesNotMatch(off.systemInstruction.parts[0].text, /Lines starting with -\|/);
 });
 
 test("provider and API key follow the selected model", () => {
@@ -376,7 +378,7 @@ test("OpenAI and DeepSeek requests disable reasoning the way each provider expec
   assert.equal(deepseek.url, "https://api.deepseek.com/chat/completions");
   assert.deepEqual(deepseekBody.thinking, { type: "disabled" });
   assert.equal(deepseekBody.reasoning_effort, undefined);
-  assert.match(deepseekBody.messages[0].content, /JSON/, "DeepSeek JSON 模式要求提示词里出现 json");
+  assert.match(deepseekBody.messages[0].content, /id\|translation/, "要求按紧凑行格式回复");
 });
 
 test("Claude request uses the Messages API with structured output", () => {
@@ -392,7 +394,7 @@ test("Claude request uses the Messages API with structured output", () => {
   assert.equal(haiku.headers["anthropic-version"], "2023-06-01");
   assert.equal(body.model, "claude-haiku-4-5");
   assert.equal(body.messages[0].role, "user");
-  assert.deepEqual(JSON.parse(body.messages[0].content).context_before, ["before"]);
+  assert.equal(body.messages[0].content, "Source: en\nTarget: zh-Hans\n-|before\n3|hello");
   assert.equal(body.output_config.format.type, "json_schema");
   assert.equal(body.output_config.format.schema.additionalProperties, false);
   assert.equal(body.output_config.format.schema.properties.translations.items.additionalProperties, false);
@@ -529,4 +531,26 @@ test("regrouped json3 keeps window definitions and replaces text events", () => 
     "We went home together.\n我们一起回家。",
     "Then it rained."
   ]);
+});
+
+test("compact line replies are parsed, with JSON as a fallback", () => {
+  const parsed = Core.parseTranslationText("```\n12|第一句\n13｜第二句\n这是第二句被折行的部分\n-|上下文不应出现\n\n14|第三|句\n```");
+  assert.deepEqual(parsed.translations, [
+    { id: 12, text: "第一句" },
+    { id: 13, text: "第二句 这是第二句被折行的部分" },
+    { id: 14, text: "第三|句" }
+  ]);
+  const json = Core.parseTranslationText('{"translations":[{"id":3,"text":"你好"}]}');
+  assert.deepEqual(json.translations, [{ id: 3, text: "你好" }]);
+  assert.throws(() => Core.parseTranslationText("抱歉，我无法翻译。"), SyntaxError);
+});
+
+test("compact prompt is much shorter than the old JSON rows", () => {
+  const batch = Array.from({ length: 30 }, (_, id) => ({ id: 1000 + id, text: `We walked around the lake number ${id}` }));
+  const { user } = Core.buildPrompts(batch, "en", "zh-Hans", "");
+  const oldStyle = JSON.stringify({ source_language: "en", target_language: "zh-Hans", subtitles: batch.map(({ id, text }) => ({ id, text })) });
+  assert.ok(user.length < oldStyle.length * 0.8, `${user.length} vs ${oldStyle.length}`);
+  const reply = batch.map(({ id }) => `${id}|我们绕着湖走了一圈`).join("\n");
+  const oldReply = JSON.stringify({ translations: batch.map(({ id }) => ({ id, text: "我们绕着湖走了一圈" })) });
+  assert.ok(reply.length < oldReply.length * 0.6, `${reply.length} vs ${oldReply.length}`);
 });

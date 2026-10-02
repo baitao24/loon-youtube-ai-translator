@@ -5,7 +5,7 @@
 })(typeof globalThis === "object" ? globalThis : this, function createYouTubeAICore() {
   "use strict";
 
-  const VERSION = "0.7.3";
+  const VERSION = "0.8.0";
   const QUERY_FLAG = "dsai";
   // 不能用 "tlang"：2026-10 起 YouTube 对带 tlang 的 timedtext 请求一律返回 429。
   const QUERY_TARGET = "dsai_target";
@@ -454,26 +454,24 @@
       "Auto-generated captions may contain misheard words; infer the intended meaning from context.",
       "Translate bracketed sound cues such as [Music] or [Applause] as short bracketed cues.",
       "Rows may be fragments of one spoken sentence split across rows; translate each row so consecutive rows read naturally in order.",
-      context.length
-        ? "context_before holds the rows just before this batch. Use it only to understand the first rows; never translate or return it."
-        : "",
       "Be concise enough for on-screen subtitles. Each translation must be a single line with no line breaks.",
-      "Return JSON only: {\"translations\":[{\"id\":0,\"text\":\"...\"}]}.",
-      "Return exactly one item for every input id, in the same order. Never merge, split, omit, or add ids.",
+      // 紧凑行格式：比逐行 JSON 少很多格式 token，同样时间能翻更多行
+      "Input subtitles are lines in the form id|text.",
+      context.length
+        ? "Lines starting with -| are the rows just before this batch. Use them only to understand the first rows; never translate or return them."
+        : "",
+      "Reply with exactly one line per input subtitle, in the same order, in the form id|translation, keeping each id unchanged.",
+      "Output nothing else: no JSON, no code fences, no numbering changes, no blank lines. Never merge, split, omit, or add ids.",
       customPrompt ? `Additional user preference: ${customPrompt}` : ""
     ]
       .filter(Boolean)
       .join("\n");
-    const user = JSON.stringify(
-      {
-        source_language: sourceLanguage || "auto",
-        target_language: targetLanguage,
-        ...(context.length ? { context_before: context } : {}),
-        subtitles: batch.map(({ id, text }) => ({ id, text }))
-      },
-      null,
-      0
-    );
+    const user = [
+      `Source: ${sourceLanguage || "auto"}`,
+      `Target: ${targetLanguage}`,
+      ...context.map((text) => `-|${singleLine(text)}`),
+      ...batch.map(({ id, text }) => `${id}|${singleLine(text)}`)
+    ].join("\n");
     return { system, user };
   }
 
@@ -505,7 +503,9 @@
       ],
       stream: false
     };
-    if (config.provider === "OpenAI") {
+    if (config.plainRequest) {
+      // 重试：不带任何推理/思考参数
+    } else if (config.provider === "OpenAI") {
       // GPT-5.x 系列：关闭推理最快；这些模型不接受自定义 temperature
       body.reasoning_effort = "none";
     } else if (config.provider === "DeepSeek") {
@@ -543,19 +543,8 @@
       throw new Error("Gemini Base URL must use HTTPS");
     }
     const model = encodeURIComponent(config.model);
-    const generationConfig = useLegacyFormat
-      ? {
-          responseMimeType: "application/json",
-          responseSchema: responseSchema()
-        }
-      : {
-          responseFormat: {
-            text: {
-              mimeType: "application/json",
-              schema: responseSchema()
-            }
-          }
-        };
+    // 紧凑行格式是纯文本，不再用 JSON Schema 约束输出
+    const generationConfig = { responseMimeType: "text/plain" };
     // 部分模型（如 2.5 系列）不接受 thinkingLevel，运行时遇到 400 会换成 thinkingBudget: 0 或 low 重试
     if (config.thinkingLevel === "budget0") {
       generationConfig.thinkingConfig = { thinkingBudget: 0 };
@@ -615,7 +604,7 @@
     const outputConfig = {};
     if (useStructuredOutput) outputConfig.format = { type: "json_schema", schema: claudeSchema() };
     // Haiku 4.5 不接受 effort；其他模型用 low 降低延迟
-    if (!/haiku/i.test(config.model)) outputConfig.effort = "low";
+    if (!/haiku/i.test(config.model) && config.claudeEffort !== false) outputConfig.effort = "low";
     if (Object.keys(outputConfig).length) body.output_config = outputConfig;
     return {
       url: `${PROVIDERS.Claude.baseUrl}/messages`,
@@ -638,6 +627,24 @@
       .map((block) => block.text || "")
       .join("");
     if (!text) throw new Error("Claude response has no text");
+    return parseTranslationText(text);
+  }
+
+  // 解析 "id|译文" 行格式；模型偶尔仍回 JSON 时按旧格式读
+  function parseTranslationText(value) {
+    if (typeof value === "object" && value !== null) return value;
+    const text = stripCodeFence(value);
+    const rows = [];
+    text.split(/\r?\n/).forEach((line) => {
+      const match = line.match(/^\s*(\d+)\s*[|｜]\s?(.*)$/);
+      if (match) {
+        rows.push({ id: Number(match[1]), text: match[2] });
+      } else if (rows.length && line.trim() && !/^\s*-[|｜]/.test(line)) {
+        // 模型偶尔把一条译文折成两行：接到上一条后面
+        rows[rows.length - 1].text += ` ${line.trim()}`;
+      }
+    });
+    if (rows.length) return { translations: rows };
     return parseJsonText(text);
   }
 
@@ -659,10 +666,10 @@
       const text = content
         .map((part) => (typeof part === "string" ? part : part?.text || ""))
         .join("");
-      return parseJsonText(text);
+      return parseTranslationText(text);
     }
     if (typeof content !== "string") throw new Error("OpenAI response has no message content");
-    return parseJsonText(content);
+    return parseTranslationText(content);
   }
 
   function parseGeminiResponse(responseBody) {
@@ -677,7 +684,7 @@
       .map((part) => part?.text || "")
       .join("");
     if (!text) throw new Error("Gemini response text is empty");
-    return parseJsonText(text);
+    return parseTranslationText(text);
   }
 
   function validateTranslations(payload, batch) {
@@ -1070,6 +1077,7 @@
     createGeminiRequest,
     parseOpenAIResponse,
     parseGeminiResponse,
+    parseTranslationText,
     createClaudeRequest,
     parseClaudeResponse,
     providerForModel,
