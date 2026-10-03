@@ -5,7 +5,7 @@
 })(typeof globalThis === "object" ? globalThis : this, function createYouTubeAICore() {
   "use strict";
 
-  const VERSION = "0.9.5";
+  const VERSION = "0.10.0";
   const QUERY_FLAG = "dsai";
   // 不能用 "tlang"：2026-10 起 YouTube 对带 tlang 的 timedtext 请求一律返回 429。
   const QUERY_TARGET = "dsai_target";
@@ -160,6 +160,8 @@
         DEFAULTS.autoTranslate
       ),
       sentenceSplit: toBoolean(raw.sentence_split ?? raw.sentenceSplit, true),
+      // 视频语言和「翻译成」相同（如看中文视频）时，改翻成这个语言
+      secondaryLanguage: languageCode(raw.secondary_language || raw.secondaryLanguage || "English"),
       backgroundTranslate: toBoolean(raw.background_translate ?? raw.backgroundTranslate, true),
       showOnly: toBoolean(
         raw.show_only ?? raw.showOnly ?? raw.ShowOnly,
@@ -284,14 +286,21 @@
       result.reason = "missing-target";
       return result;
     }
+    let finalTarget = targetLanguage;
     if (!explicitTarget && languageRoot(sourceLanguage) === languageRoot(targetLanguage)) {
-      result.reason = "same-language";
-      return result;
+      const secondary = config.secondaryLanguage;
+      if (!secondary || languageRoot(secondary) === languageRoot(sourceLanguage)) {
+        result.reason = "same-language";
+        return result;
+      }
+      // 比如中文视频：原文已是中文，改翻成第二语言
+      finalTarget = secondary;
+      result.targetLanguage = secondary;
     }
 
     url.searchParams.delete("tlang");
     url.searchParams.set(QUERY_FLAG, "1");
-    url.searchParams.set(QUERY_TARGET, targetLanguage);
+    url.searchParams.set(QUERY_TARGET, finalTarget);
     result.changed = url.toString() !== inputUrl;
     result.reason = result.changed ? "rewritten" : "already-rewritten";
     result.url = url.toString();
@@ -307,12 +316,38 @@
     }
   }
 
-  function responseLanguages(inputUrl, config) {
+  // 按文字系统粗略识别字幕语言：只用于字幕地址里没有 lang 时，判断是否与目标语言相同
+  function detectLanguage(cues) {
+    const sample = (cues || []).slice(0, 200).map((cue) => cue.text).join(" ");
+    const count = (pattern) => (sample.match(pattern) || []).length;
+    const kana = count(/[\u3040-\u30ff]/g);
+    const hangul = count(/[\uac00-\ud7af]/g);
+    const han = count(/[\u4e00-\u9fff]/g);
+    const latin = count(/[A-Za-z]/g);
+    const total = kana + hangul + han + latin;
+    if (!total) return "";
+    if (kana / total > 0.1) return "ja";
+    if (hangul / total > 0.3) return "ko";
+    if (han / total > 0.3) return "zh";
+    return "";
+  }
+
+  function responseLanguages(inputUrl, config, cues) {
     const url = new URL(inputUrl);
-    return {
-      source: url.searchParams.get("lang") || "auto",
-      target: url.searchParams.get(QUERY_TARGET) || config.targetLanguage
-    };
+    const lang = url.searchParams.get("lang");
+    const source = lang || detectLanguage(cues) || "auto";
+    let target = url.searchParams.get(QUERY_TARGET) || config.targetLanguage;
+    // 地址里没写语言、但内容和目标语言相同时（如中文字幕要翻成中文），改用第二语言
+    if (
+      !lang &&
+      source !== "auto" &&
+      languageRoot(source) === languageRoot(target) &&
+      config.secondaryLanguage &&
+      languageRoot(config.secondaryLanguage) !== languageRoot(source)
+    ) {
+      target = config.secondaryLanguage;
+    }
+    return { source, target };
   }
 
   function cleanCueText(text) {
@@ -1068,6 +1103,8 @@
     rewriteTimedTextRequest,
     shouldProcessResponse,
     responseLanguages,
+    detectLanguage,
+    languageRoot,
     extractCues,
     extractSrv3Cues,
     chunkCues,

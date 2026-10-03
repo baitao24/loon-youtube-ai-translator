@@ -6,7 +6,7 @@
 #!system = iOS,iPadOS,macOS
 #!system_version = 15
 #!loon_version = 3.4.0(962)
-#!version = 0.9.5
+#!version = 0.10.0
 
 [Argument]
 ai_enabled = switch,true,tag=AI 翻译,desc=关闭后不做翻译，只显示 YouTube 原文字幕
@@ -16,6 +16,7 @@ deepseek_api_key = input,"",tag=DeepSeek API Key,desc=选 deepseek 开头的模�
 openai_api_key = input,"",tag=OpenAI API Key,desc=选 gpt 开头的模型时填写；在 platform.openai.com 创建
 claude_api_key = input,"",tag=Claude API Key,desc=选 claude 开头的模型时填写；在 platform.claude.com 创建
 target_language = select,"简体中文","繁體中文","日本語","한국어","English",tag=翻译成,desc=如果在 YouTube 字幕菜单里选了「自动翻译」成某种语言，以菜单为准
+secondary_language = select,"English","简体中文","繁體中文","日本語","한국어",tag=同语言视频翻译成,desc=视频本身就是「翻译成」的语言时（比如设成简体中文、看中文视频），改翻成这个语言。字幕顺序照常，例如原文在上时就是中文在上、英文在下
 Position = select,"原文在上","译文在上",tag=字幕顺序,desc=每种语言各占一行
 ShowOnly = switch,false,tag=只显示译文,desc=开启后不显示原文
 background_translate = switch,true,tag=播放时后台续翻,desc=长视频第一次没翻完时，看视频期间借 YouTube 的观看统计请求在后台接着翻，翻完会通知；之后重新打开视频即可看到完整双语字幕。中途不看的视频也可能被翻完，会多用一些 API 额度
@@ -34,12 +35,12 @@ AND,((PROTOCOL,QUIC),(DOMAIN,youtubei.googleapis.com)),REJECT
 # 只拦截字幕接口（/api/timedtext），不碰 player、get_watch 等播放信息接口，
 # 避免和 YouTube 去广告插件处理同一个请求导致去广告失效
 # AI 翻译：请求阶段去掉 tlang（YouTube 对它返回 429），响应阶段直接翻原文字幕
-http-request ^https?:\/\/(www|m)\.youtube\.com\/api\/timedtext(\?.+)?$ script-path=https://raw.githubusercontent.com/baitao24/loon-youtube-ai-translator/main/dist/dualsubs-ai.bundle.js, timeout=8, tag=AI 字幕请求, argument=[{ai_enabled},{model},{api_key},{deepseek_api_key},{openai_api_key},{claude_api_key},{target_language},{Position},{ShowOnly},{sentence_split},{background_translate},{custom_prompt},{LogLevel}]
+http-request ^https?:\/\/(www|m)\.youtube\.com\/api\/timedtext(\?.+)?$ script-path=https://raw.githubusercontent.com/baitao24/loon-youtube-ai-translator/main/dist/dualsubs-ai.bundle.js, timeout=8, tag=AI 字幕请求, argument=[{ai_enabled},{model},{api_key},{deepseek_api_key},{openai_api_key},{claude_api_key},{target_language},{secondary_language},{Position},{ShowOnly},{sentence_split},{background_translate},{custom_prompt},{LogLevel}]
 # Loon 按改写前的地址匹配响应规则，所以这里匹配原始 timedtext 地址；脚本内部再检查 dsai 标记
-http-response ^https?:\/\/(www|m)\.youtube\.com\/api\/timedtext(\?.+)?$ requires-body=1, max-size=0, script-path=https://raw.githubusercontent.com/baitao24/loon-youtube-ai-translator/main/dist/dualsubs-ai.bundle.js, timeout=8, tag=AI 字幕响应, argument=[{ai_enabled},{model},{api_key},{deepseek_api_key},{openai_api_key},{claude_api_key},{target_language},{Position},{ShowOnly},{sentence_split},{background_translate},{custom_prompt},{LogLevel}]
+http-response ^https?:\/\/(www|m)\.youtube\.com\/api\/timedtext(\?.+)?$ requires-body=1, max-size=0, script-path=https://raw.githubusercontent.com/baitao24/loon-youtube-ai-translator/main/dist/dualsubs-ai.bundle.js, timeout=8, tag=AI 字幕响应, argument=[{ai_enabled},{model},{api_key},{deepseek_api_key},{openai_api_key},{claude_api_key},{target_language},{secondary_language},{Position},{ShowOnly},{sentence_split},{background_translate},{custom_prompt},{LogLevel}]
 
 # 后台续翻：借播放时的观看统计请求（不碰去广告插件拦截的 stats/ads），每次最多占用约 20 秒
-http-request ^https?:\/\/s\.youtube\.com\/api\/stats\/(watchtime|qoe|playback)(\?.*)?$ script-path=https://raw.githubusercontent.com/baitao24/loon-youtube-ai-translator/main/dist/dualsubs-ai.bundle.js, timeout=30, tag=AI 字幕后台续翻, argument=[{ai_enabled},{model},{api_key},{deepseek_api_key},{openai_api_key},{claude_api_key},{target_language},{Position},{ShowOnly},{sentence_split},{background_translate},{custom_prompt},{LogLevel}]
+http-request ^https?:\/\/s\.youtube\.com\/api\/stats\/(watchtime|qoe|playback)(\?.*)?$ script-path=https://raw.githubusercontent.com/baitao24/loon-youtube-ai-translator/main/dist/dualsubs-ai.bundle.js, timeout=30, tag=AI 字幕后台续翻, argument=[{ai_enabled},{model},{api_key},{deepseek_api_key},{openai_api_key},{claude_api_key},{target_language},{secondary_language},{Position},{ShowOnly},{sentence_split},{background_translate},{custom_prompt},{LogLevel}]
 
 [MITM]
 hostname = www.youtube.com, m.youtube.com, s.youtube.com

@@ -38,7 +38,7 @@ test("normalizes DualSubs AI settings and keeps secrets opaque", () => {
     ai_enabled: "true",
     concurrency: "20"
   });
-  assert.equal(Core.VERSION, "0.9.5");
+  assert.equal(Core.VERSION, "0.10.0");
   assert.equal(config.provider, "OpenAI-Compatible");
   assert.equal(config.apiKey, "secret-value");
   assert.equal(config.model, "deepseek-chat");
@@ -553,4 +553,40 @@ test("compact prompt is much shorter than the old JSON rows", () => {
   const reply = batch.map(({ id }) => `${id}|我们绕着湖走了一圈`).join("\n");
   const oldReply = JSON.stringify({ translations: batch.map(({ id }) => ({ id, text: "我们绕着湖走了一圈" })) });
   assert.ok(reply.length < oldReply.length * 0.6, `${reply.length} vs ${oldReply.length}`);
+});
+
+test("videos already in the target language are translated into the secondary language", () => {
+  const config = Core.normalizeConfig({ api_key: "k", model: "m", target_language: "简体中文" });
+  assert.equal(config.secondaryLanguage, "en", "默认第二语言是英语");
+  const chinese = Core.rewriteTimedTextRequest("https://www.youtube.com/api/timedtext?v=a&lang=zh-Hans&fmt=srv3", config);
+  assert.equal(new URL(chinese.url).searchParams.get("dsai_target"), "en");
+  const traditional = Core.rewriteTimedTextRequest("https://www.youtube.com/api/timedtext?v=a&lang=zh-TW&fmt=srv3", config);
+  assert.equal(new URL(traditional.url).searchParams.get("dsai_target"), "en");
+  const english = Core.rewriteTimedTextRequest("https://www.youtube.com/api/timedtext?v=a&lang=en&fmt=srv3", config);
+  assert.equal(new URL(english.url).searchParams.get("dsai_target"), "zh-Hans", "英文视频照旧翻成中文");
+
+  const japaneseSecondary = Core.normalizeConfig({ api_key: "k", model: "m", target_language: "简体中文", secondary_language: "日本語" });
+  const toJa = Core.rewriteTimedTextRequest("https://www.youtube.com/api/timedtext?v=a&lang=zh-Hans", japaneseSecondary);
+  assert.equal(new URL(toJa.url).searchParams.get("dsai_target"), "ja");
+
+  // 第二语言也和视频语言相同：不翻译
+  const same = Core.normalizeConfig({ api_key: "k", model: "m", target_language: "简体中文", secondary_language: "繁體中文" });
+  const skipped = Core.rewriteTimedTextRequest("https://www.youtube.com/api/timedtext?v=a&lang=zh-Hans", same);
+  assert.equal(skipped.reason, "same-language");
+  assert.equal(new URL(skipped.url).searchParams.has("dsai"), false);
+});
+
+test("subtitle language is detected from the text when the URL does not say", () => {
+  const zh = [{ text: "今天我们来看看这个东西到底怎么用" }, { text: "首先打开设置" }];
+  const ja = [{ text: "今日はこれを使ってみましょう" }];
+  const ko = [{ text: "오늘은 이것을 사용해 보겠습니다" }];
+  const en = [{ text: "Today we look at how this works" }];
+  assert.equal(Core.detectLanguage(zh), "zh");
+  assert.equal(Core.detectLanguage(ja), "ja");
+  assert.equal(Core.detectLanguage(ko), "ko");
+  assert.equal(Core.detectLanguage(en), "");
+  const config = Core.normalizeConfig({ api_key: "k", model: "m", target_language: "简体中文" });
+  const url = "https://www.youtube.com/api/timedtext?v=a&dsai=1&dsai_target=zh-Hans";
+  assert.deepEqual(Core.responseLanguages(url, config, zh), { source: "zh", target: "en" });
+  assert.deepEqual(Core.responseLanguages(url, config, en), { source: "auto", target: "zh-Hans" });
 });

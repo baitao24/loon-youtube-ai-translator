@@ -730,7 +730,13 @@
     const contentType = subtitleContentType(sourceDocument);
 
     try {
-      const languages = Core.responseLanguages($request.url, config);
+      const languages = Core.responseLanguages($request.url, config, sourceDocument.cues);
+      // 识别后原文已经是目标语言（且没有可用的第二语言）时不翻译
+      if (languages.source !== "auto" && Core.languageRoot(languages.source) === Core.languageRoot(languages.target)) {
+        log("INFO", `Subtitles are already in ${languages.target}; nothing to translate`);
+        donePassthrough("source-only");
+        return;
+      }
       const rowsKey = Core.makeCacheKey($request.url, config, sourceDocument.cues, languages);
       const known = readRows(rowsKey);
       log("INFO", `Saved AI rows for this video: ${known.size}`);

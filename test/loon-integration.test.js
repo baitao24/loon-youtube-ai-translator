@@ -1093,3 +1093,45 @@ test("translated rows are kept for the 20 most recent videos", async () => {
   assert.equal(kept.length, 20, "保留最近 20 个视频");
   assert.equal(JSON.parse(store.get("@DualSubs-AI.RowsIndex.v2")).length, 20);
 });
+
+test("a Chinese video gets Chinese on top and the English translation below", async () => {
+  let prompt = "";
+  const body = JSON.stringify({
+    events: [
+      { tStartMs: 0, dDurationMs: 2000, segs: [{ utf8: "今天我们去湖边" }] },
+      { tStartMs: 2000, dDurationMs: 2000, segs: [{ utf8: "风景非常好" }] }
+    ]
+  });
+  const request = await runLoon({
+    argument: { ...config(), Position: "原文在上" },
+    request: { url: "https://www.youtube.com/api/timedtext?v=zhvideo&lang=zh-Hans&fmt=json3", method: "GET", headers: {} }
+  });
+  const rewritten = request.doneValue.url;
+  assert.equal(new URL(rewritten).searchParams.get("dsai_target"), "en");
+  const result = await runLoon({
+    argument: { ...config(), Position: "原文在上" },
+    request: { url: rewritten, method: "GET", headers: {} },
+    response: { status: 200, headers: { "Content-Type": "application/json" }, body },
+    httpClient: {
+      get: noGet,
+      post(apiRequest, callback) {
+        prompt = JSON.parse(apiRequest.body).contents[0].parts[0].text;
+        callback(null, { status: 200 }, geminiRows([{ id: 0, text: "Today we went to the lake" }, { id: 1, text: "The view was great" }]));
+      }
+    }
+  });
+  assert.match(prompt, /^Source: zh-Hans\nTarget: en/);
+  const events = JSON.parse(result.doneValue.body).events.map((event) => event.segs[0].utf8);
+  assert.deepEqual(events, ["今天我们去湖边\nToday we went to the lake", "风景非常好\nThe view was great"]);
+});
+
+test("subtitles detected as the target language with no usable secondary language pass through", async () => {
+  const body = JSON.stringify({ events: [{ tStartMs: 0, dDurationMs: 2000, segs: [{ utf8: "今天我们去湖边" }] }] });
+  const result = await runLoon({
+    argument: { ...config(), secondary_language: "繁體中文" },
+    request: { url: "https://www.youtube.com/api/timedtext?v=nolang&fmt=json3&dsai=1&dsai_target=zh-Hans", method: "GET", headers: {} },
+    response: { status: 200, headers: { "Content-Type": "application/json" }, body },
+    httpClient: { get: noGet, post: () => assert.fail("已经是目标语言，不应调用 AI") }
+  });
+  assert.equal(result.doneValue.headers["x-dualsubs-ai-result"], "source-only");
+});
