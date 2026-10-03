@@ -1067,3 +1067,29 @@ test("switching to another video stops the previous video from sending new batch
   assert.ok(lines.some((line) => /newer subtitle load/.test(line)));
   assert.equal(result.doneValue.headers["x-dualsubs-ai-result"], "ai-partial");
 });
+
+test("translated rows are kept for the 20 most recent videos", async () => {
+  const store = new Map();
+  for (let index = 0; index < 22; index += 1) {
+    await runLoon({
+      argument: config(),
+      request: { url: processedUrl("json3", `video${index}`), method: "GET", headers: {} },
+      response: {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ events: [{ tStartMs: 0, dDurationMs: 900, segs: [{ utf8: `Hello ${index}` }] }] })
+      },
+      store,
+      httpClient: {
+        get: noGet,
+        post(request, callback) {
+          const ids = requestedIds(request);
+          callback(null, { status: 200 }, geminiRows(ids.map((id) => ({ id, text: `你好${index}` }))));
+        }
+      }
+    });
+  }
+  const kept = [...store.entries()].filter(([key, value]) => key.startsWith("@DualSubs-AI.Rows.v2:") && value);
+  assert.equal(kept.length, 20, "保留最近 20 个视频");
+  assert.equal(JSON.parse(store.get("@DualSubs-AI.RowsIndex.v2")).length, 20);
+});

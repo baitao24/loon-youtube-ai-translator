@@ -8,6 +8,8 @@
   // 每个视频单独一个存储键（避免所有视频挤在一条里撞到存储上限），索引记录最近的视频用于淘汰
   const ROWS_PREFIX = "@DualSubs-AI.Rows.v2:";
   const ROWS_INDEX_KEY = "@DualSubs-AI.RowsIndex.v2";
+  // 每个视频单独存储，多留一些：连续打开六七个视频再回到第一个时，不用重新翻
+  const ROWS_VIDEO_LIMIT = 20;
   // 剩余时间不够一批正常耗时（真机 2～3 秒）就不再发新批次。
   const MIN_LAUNCH_MS = 2000;
   const RENDER_RESERVE_MS = 150;
@@ -454,14 +456,14 @@
       const index = readJsonStore(ROWS_INDEX_KEY, []);
       const list = (Array.isArray(index) ? index : []).filter((item) => item !== key);
       list.unshift(key);
-      list.slice(config.cacheEntries).forEach((old) => {
+      list.slice(ROWS_VIDEO_LIMIT).forEach((old) => {
         try {
           $persistentStore.write("", ROWS_PREFIX + old);
         } catch (_) {
           // 清理失败不影响本次结果
         }
       });
-      writeJsonStore(ROWS_INDEX_KEY, list.slice(0, config.cacheEntries));
+      writeJsonStore(ROWS_INDEX_KEY, list.slice(0, ROWS_VIDEO_LIMIT));
       return stored;
     } catch (error) {
       log("WARN", `Row cache write skipped: ${safeError(error)}`);
